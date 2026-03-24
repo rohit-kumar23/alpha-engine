@@ -119,6 +119,7 @@ getcap ./alpha_engine
 - `docs/ENVIRONMENT_VARIABLES.md`: meaning and use-case of every env variable
 - `docs/NEXT_IMPLEMENTATION_STEPS.md`: practical roadmap to real-money readiness
 - `docs/COMPONENT_TESTING_GUIDELINES.md`: component-by-component correctness testing blueprint
+- `docs/COMPONENT_OVERVIEW.md`: plain-English what each component does and how they interact
 
 ## Current Implementation Status
 
