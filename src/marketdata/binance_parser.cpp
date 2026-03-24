@@ -109,14 +109,19 @@ std::size_t parse_depth_levels(
         if (close == std::string_view::npos) {
             break;
         }
-        const std::size_t next_open = json.find('[', close + 1);
-        if (next_open == std::string_view::npos) {
+        // Do not scan past the closing `]` of the outer "b"/"a" array (next `[` would be the sibling side).
+        std::size_t probe = close + 1;
+        while (probe < json.size() && (json[probe] == ' ' || json[probe] == '\t' || json[probe] == '\n' ||
+                                       json[probe] == '\r' || json[probe] == ',')) {
+            ++probe;
+        }
+        if (probe >= json.size() || json[probe] == ']') {
             break;
         }
-        if (json[next_open - 1] == ']') {
+        if (json[probe] != '[') {
             break;
         }
-        pos = next_open;
+        pos = probe;
     }
     return count;
 }

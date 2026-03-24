@@ -2,6 +2,8 @@
 
 This document defines *what to test* and *how to test* every major component before writing actual test code.
 
+For the `tests/` directory layout, build integration, and commands to run suites, see [`COMPONENT_TESTING_SUITE.md`](COMPONENT_TESTING_SUITE.md).
+
 ## Important Reality
 
 Absolute "100% correctness" cannot be proven for a live trading system in all market/network conditions.  

@@ -7,6 +7,10 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 find_package(OpenSSL REQUIRED)
 
+# =============================================================================
+# Production executable
+# =============================================================================
+
 add_executable(alpha_engine
     src/application/main.cpp
     src/analytics/pnl_engine.cpp
@@ -30,3 +34,27 @@ target_link_libraries(alpha_engine PRIVATE OpenSSL::SSL OpenSSL::Crypto pthread)
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     target_compile_options(alpha_engine PRIVATE -O2 -Wall -Wextra -Wpedantic)
 endif()
+
+# =============================================================================
+# Tests — marketdata + orderbook (fixtures + optional live WebSocket smoke)
+# =============================================================================
+
+add_executable(run_marketdata_orderbook
+    tests/run_marketdata_orderbook.cpp
+    tests/marketdata/test_binance_parser.cpp
+    tests/marketdata/test_ws_smoke.cpp
+    tests/orderbook/test_l2_book.cpp
+    src/marketdata/binance_parser.cpp
+    src/marketdata/binance_ws_client.cpp
+    src/orderbook/l2_book.cpp
+)
+
+target_include_directories(run_marketdata_orderbook PRIVATE include ${CMAKE_SOURCE_DIR})
+target_link_libraries(run_marketdata_orderbook PRIVATE OpenSSL::SSL OpenSSL::Crypto pthread)
+
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(run_marketdata_orderbook PRIVATE -O2 -Wall -Wextra -Wpedantic)
+endif()
+
+enable_testing()
+add_test(NAME marketdata_orderbook COMMAND run_marketdata_orderbook)

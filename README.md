@@ -118,7 +118,8 @@ getcap ./alpha_engine
 - `docs/ARCHITECTURE.txt`: data flow, thread model, execution path, failure handling
 - `docs/ENVIRONMENT_VARIABLES.md`: meaning and use-case of every env variable
 - `docs/NEXT_IMPLEMENTATION_STEPS.md`: practical roadmap to real-money readiness
-- `docs/COMPONENT_TESTING_GUIDELINES.md`: component-by-component correctness testing blueprint
+- `docs/COMPONENT_TESTING_GUIDELINES.md`: what to test per component (checklists and principles)
+- `docs/COMPONENT_TESTING_SUITE.md`: `tests/` layout, build/run commands (CMake/Make/CTest), extending suites
 - `docs/COMPONENT_OVERVIEW.md`: plain-English what each component does and how they interact
 
 ## Current Implementation Status

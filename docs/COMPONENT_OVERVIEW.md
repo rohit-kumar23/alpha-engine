@@ -185,4 +185,5 @@ Used by **application** wherever you see a queue between the websocket thread an
 ## Related docs
 
 - [`ARCHITECTURE.txt`](ARCHITECTURE.txt) — technical topology, threads, and failure behavior.  
-- [`COMPONENT_TESTING_GUIDELINES.md`](COMPONENT_TESTING_GUIDELINES.md) — what to test per component before shipping.
+- [`COMPONENT_TESTING_GUIDELINES.md`](COMPONENT_TESTING_GUIDELINES.md) — what to test per component before shipping.  
+- [`COMPONENT_TESTING_SUITE.md`](COMPONENT_TESTING_SUITE.md) — where tests live and how to run or extend them.
