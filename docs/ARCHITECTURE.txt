@@ -1,12 +1,30 @@
 ================================================================================
-ALPHA ENGINE — ARCHITECTURE, DATA FLOW, EXECUTION, STRATEGY
+ALPHA ENGINE ARCHITECTURE
 ================================================================================
-Pure C++23. Single process. Binance USD-M futures (BTCUSDT, ETHUSDT, SOLUSDT).
-This file describes how components connect and what signals exist today.
+
+Scope:
+- C++23, single process
+- Binance USD-M perpetuals: BTCUSDT, ETHUSDT, SOLUSDT
+- Latency-sensitive hot path with isolated control paths
+
+Purpose of this file:
+- document data/control flow and thread responsibilities
+- define failure behavior and recovery paths
+- describe what is production-usable vs still evolving
+
+Note:
+- environment variable details are documented in `docs/ENVIRONMENT_VARIABLES.md`
 
 --------------------------------------------------------------------------------
-1. HIGH-LEVEL PICTURE
+1) SYSTEM TOPOLOGY
 --------------------------------------------------------------------------------
+
+Hot path (decision critical):
+
+  Binance WS -> Parser -> MdEvent SPSC -> Main loop -> L2Book -> Strategy
+      -> OrderManager -> PreTradeRisk -> Gateway -> Exchange REST
+
+High-level picture:
 
   [Binance WS: fstream or demo stream host]
            |
@@ -41,280 +59,232 @@ This file describes how components connect and what signals exist today.
                     |               BinanceGateway (signed REST)
                     |                       |
                     v                       v
-              snapshot_req_queue     HTTPS demo-fapi or fapi
+         snapshot_req_queue       HTTPS demo-fapi or fapi
                     ^
                     |
   +---------------------------+
   | Snapshot thread           |  REST GET /fapi/v1/depth (same mode as gateway)
   | HFT_CORE_SNAPSHOT         |
   +---------------------------+
+                    |
+                    v
+            snapshot_res_queue
+                    |
+                    +------------------------------> MAIN THREAD (seed/reseed books)
 
-  Parallel control / I/O paths (do not run strategy code):
+Control and observability paths:
 
-  +---------------------------+     +---------------------------+
-  | User stream thread        |     | Reconcile thread (opt.) |
-  | listenKey + WS ORDER_     |     | GET /fapi/v1/openOrders |
-  | TRADE_UPDATE              |     | HFT_RECONCILE_INTERVAL  |
-  +---------------------------+     +---------------------------+
-           | exec_report_queue (SPSC)           |
-           +-----------------------------------> main consumes
-                                                  vs oms.live_orders()
+  UserStream WS -> exec_report_queue (SPSC) -> Main loop -> OMS
+  Main loop -> SnapshotReq SPSC -> Snapshot thread -> SnapshotRes SPSC -> Main
+  Reconcile thread -> remote openOrders snapshot -> Main healing checks
+  Main loop -> ExecAudit SPSC -> audit writer thread
+  Main loop -> MdHealth SPSC -> health writer thread
 
-  +---------------------------+
-  | ExecAuditLog writer       |  SPSC of fixed lines -> file
-  | (HFT_EXEC_AUDIT_LOG=1 ->  |  (/tmp/alpha_exec.log default)
-  |  /tmp/... or custom path) |
-  +---------------------------+
-
-  +---------------------------+
-  | MdHealthLog writer        |  SPSC of MD health lines -> file
-  | (HFT_MD_HEALTH_LOG=1 ->   |  (/tmp/alpha_health.log default)
-  |  /tmp/... or custom path) |
-  +---------------------------+
-
+This split keeps network/recovery/logging work away from the strategy decision loop.
 
 --------------------------------------------------------------------------------
-2. THREADS AND AFFINITY
+2) THREAD MODEL
 --------------------------------------------------------------------------------
 
-  Thread              Env core id              Role
-  ------------------  -----------------------  --------------------------------
-  WebSocket           HFT_CORE_WS             Read TLS, parse to MdEvent, push SPSC
-  Snapshot            HFT_CORE_SNAPSHOT       Pop depth snapshot requests, REST fetch, push result
-  User stream         HFT_CORE_SNAPSHOT       listenKey REST + user WS, push ExecReportMsg
-  Reconcile           HFT_CORE_RECONCILE      Periodic signed openOrders (optional)
-  Main                HFT_CORE_MAIN           Pop MdEvent, books, strategy, risk, gateway, OMS
-  Exec audit          (inside ExecAuditLog)   Pop audit ring, fwrite lines
+Thread roles:
 
-  Optional: HFT_RT_FIFO + HFT_RT_PRIO_* for SCHED_FIFO priorities per thread.
-  Optional: HFT_MLOCKALL, HFT_PREFAULT_MB, HFT_BUSY_SPIN on main idle loop.
+- WebSocket thread (`HFT_CORE_WS`)
+  - receives combined market-data stream
+  - parses/normalizes into `MdEvent`
+  - pushes to lock-free SPSC queue
 
---------------------------------------------------------------------------------
-3. MARKET DATA PATH (HOT)
---------------------------------------------------------------------------------
+- Main thread (`HFT_CORE_MAIN`)
+  - consumes market data
+  - updates per-symbol books
+  - runs strategy trigger gating and intent generation
+  - executes order management, risk checks, and gateway sends
+  - consumes exec reports and applies OMS transitions
 
-  Streams (combined WebSocket):
-    *bookTicker, *depth@100ms, *aggTrade for btcusdt, ethusdt, solusdt
+- Snapshot thread (`HFT_CORE_SNAPSHOT`)
+  - handles depth snapshot reseed requests
+  - returns snapshot results asynchronously
 
-  Liveness watchdog:
-    - Main loop tracks ws_last_msg_age_ms from websocket recv timestamps.
-    - If no WS message for HFT_WS_IDLE_RECONNECT_MS, main forces WS reconnect.
-    - Reconnect attempts are cooldown-limited by
-      HFT_WS_IDLE_RECONNECT_COOLDOWN_MS.
-    - Health events are written to HFT_MD_HEALTH_LOG (`md_health.log` style).
+- User stream thread (typically same affinity class as control threads)
+  - manages listenKey and order-trade update stream
+  - emits normalized execution reports
 
-  MdEvent fields (see hft/md/binance_types.hpp):
-    - Timestamps: ts_recv_ns, ts_parse_ns, ts_enqueued_ns, ts_exchange_ns
-    - Instrument, event type (BookTicker / DepthUpdate / AggTrade)
-    - Top-of-book and depth delta fields as parsed from JSON
+- Reconcile thread (`HFT_CORE_RECONCILE`, optional)
+  - periodically fetches signed `openOrders`
+  - provides remote-state signal for mismatch/heal checks
 
-  L2Book (per instrument):
-    - Seed from REST depth snapshot (lastUpdateId + levels)
-    - Apply depth updates with Binance bridge rules (U/u/pu, in_sync)
-    - in_sync flips true after depth sequence warmup
-    - If bridge matching is repeatedly missed while depth advances, adopts a fresh
-      continuity anchor to avoid indefinite bootstrap stalls
-    - Exposes BookSnapshot: best bid/ask, qty, spread, imbalance
+- Writer threads
+  - execution audit writer
+  - market-data health writer
 
-  Out-of-sync:
-    - Main requests resnapshot via snapshot_req_queue; depth may buffer until seeded
+Scheduling notes:
+- optional realtime mode (`SCHED_FIFO`) and `mlockall` are available
+- hot and control threads should be pinned to separate cores
+- all control-path loops are bounded to prevent tail-latency blowups
 
 --------------------------------------------------------------------------------
-4. STRATEGY AND “SIGNALS” (TRIGGER GATING)
+3) MARKET DATA PIPELINE
 --------------------------------------------------------------------------------
 
-  StrategyEngine::on_book_update(BookSnapshot, StrategyState&) -> optional OrderIntent
+Inputs:
+- combined websocket streams for `bookTicker`, `depth@100ms`, `aggTrade`
 
-  Current strategy logic (hft/strategy.cpp — baseline / research):
-    - Requires valid bid/ask and spread
-    - Skips if |inventory| >= StrategyParams::inventory_limit
-    - Microprice-style fair value from top-of-book quantities
-    - Requires minimum edge: |micro-mid| / mid >= edge_threshold_bps
-    - Skew: micro - alpha * inventory
-    - Quotes: bid_quote = skew - 0.5*spread_param, ask_quote = skew + 0.5*spread_param
-    - Signal: if micro > mid -> intent BUY at bid_quote; else SELL at ask_quote
-    - Size: qty in [qty_min, qty_max], linearly shrunk as |inventory| approaches
-      inventory_limit (inventory-aware risk throttling on strategy side)
-    - Runtime params from env:
-        HFT_STRAT_ALPHA_X1E6, HFT_STRAT_BASE_SPREAD_X10000, HFT_STRAT_INV_LIM_X1000,
-        HFT_STRAT_EDGE_BPS_X1000, HFT_STRAT_QTY_MIN_X1000, HFT_STRAT_QTY_MAX_X1000,
-        HFT_STRAT_QTY_INV_SHRINK_PPM
-    - Per-symbol overrides:
-        HFT_STRAT_ALPHA_{BTC|ETH|SOL}_X1E6
-        HFT_STRAT_BASE_SPREAD_{BTC|ETH|SOL}_X10000
-        HFT_STRAT_INV_LIM_{BTC|ETH|SOL}_X1000
-        HFT_STRAT_EDGE_{BTC|ETH|SOL}_BPS_X1000
-        HFT_STRAT_QTY_MIN_{BTC|ETH|SOL}_X1000
-        HFT_STRAT_QTY_MAX_{BTC|ETH|SOL}_X1000
-        HFT_STRAT_QTY_INV_SHRINK_{BTC|ETH|SOL}_PPM
-      Main loop uses a prebuilt StrategyEngine per symbol (no hot-path env access).
+Processing:
+1) websocket frame parse and normalize into `MdEvent`
+2) non-blocking enqueue to SPSC ring
+3) main loop consumes events and mutates per-symbol `L2Book`
 
-  Trigger gating (main.cpp — reduces strategy call rate, env-tunable):
-    HFT_TRIGGER_MIN_INTERVAL_US     min time between triggers per symbol
-    HFT_TRIGGER_MIN_MID_BPS_X1000   mid must move enough (bps * 1000)
-    HFT_TRIGGER_MIN_IMB_PPM       imbalance must move enough (parts per million)
+Book integrity:
+- depth sequencing uses Binance bridge constraints (`U/u/pu`)
+- snapshot-seeded warmup establishes continuity
+- if continuity is lost, symbol is gated and resnapshot requested
 
-  Trading readiness:
-    HFT_REQUIRE_ALL_SYMBOLS_SYNC    if 1, global state stays SYNCING until all three books in_sync
-    HFT_ALLOW_PARTIAL_TRADING       if 1, a symbol is tradable once its own book is ready+in_sync
-    Telemetry exposes tradable_{btc,eth,sol} independently of global state.
-
-  Canary fill controls (test-mode only):
-    HFT_CANARY_FILL_MODE            if 1, New order price can be crossed by configured bps
-    HFT_CANARY_FILL_CROSS_BPS       crossing amount for canary mode
-    HFT_CANARY_ROTATE_SYMBOLS       if 1, active canary symbol rotates BTC -> ETH -> SOL
-    HFT_CANARY_ROTATION_WINDOW_MS   duration per symbol before deterministic rotation
-
-  Inventory wiring:
-    - Before each strategy call, StrategyState.inventory is refreshed from
-      PreTradeRisk::position(instrument), which is updated on fill events.
-
-  OrderManager:
-    - One live slot per (instrument, side) in baseline; New vs Replace by price/qty delta
-    - Replace threshold: HFT_EXEC_REPLACE_BPS_X1000
-    - Client order ids: atomic monotonic; REST uses newClientOrderId=hft_<id>
-    - Cancel policies:
-        * opposite-side-first cancel (avoid stale crossed inventory posture)
-        * stale cancel timeout: HFT_EXEC_CANCEL_STALE_MS and per-symbol overrides
-        * adverse-move cancel: HFT_EXEC_ADVERSE_CANCEL_{BTC|ETH|SOL}_BPS_X1000
-    - Telemetry counters by reason/symbol:
-        can_opp_{btc,eth,sol}, can_stale_{btc,eth,sol}, can_adv_{btc,eth,sol}
-    - Optional adaptive controller (1s tick, not per-event hot path):
-        adjusts stale/adverse thresholds per symbol toward target cancel rates,
-        bounded by configured min/max clamps.
-
-  Cancel commands:
-    - OMS + gateway support DELETE with origClientOrderId
-    - OrderManager emits Cancel commands via the policies above before replacing/newing
+Liveness:
+- main loop tracks websocket message age
+- idle timeout triggers reconnect with cooldown
+- reconnect events are emitted via MD health logger
 
 --------------------------------------------------------------------------------
-5. EXECUTION PATH
+4) STRATEGY AND INTENT GENERATION
 --------------------------------------------------------------------------------
 
-  OrderCommand:
-    type: New | Replace | Cancel
-    instrument, client_order_id, side, price, qty, ts_ns
+Strategy interface:
+- `on_book_update(BookSnapshot, StrategyState) -> optional OrderIntent`
 
-  PreTradeRisk::validate (before send):
-    - Kill switch: HFT_KILL_SWITCH=1 or runtime toggle via SIGUSR1 if enabled
-    - Max order qty, max notional, max absolute position (projected)
+Current baseline behavior:
+- computes microprice-style fair value from top-of-book
+- applies inventory skew and spread model
+- enforces minimum edge before emitting intent
+- applies inventory-based size shrink
+- supports symbol-specific parameter overrides
 
-  BinanceGateway::send:
-    - POST /fapi/v1/order  (New)
-    - PUT  /fapi/v1/order  (Replace: origClientOrderId, side, limit params)
-    - DELETE /fapi/v1/order (Cancel: symbol + origClientOrderId)
-    - HMAC-SHA256 query signing; BINANCE_MODE selects REST host (demo vs live)
-    - Retries: HFT_GATEWAY_RETRY_*
-    - Reuses a process-wide SSL_CTX (initialized once) to lower per-request setup cost
-    - Parses HTTP status + Binance JSON "code" on failure
-    - Updates atomic g_rest_weight_1m from X-MBX-USED-WEIGHT-1M when present
-    - Main-thread governor gates sends when:
-        * g_rest_weight_1m >= HFT_REST_WEIGHT_SOFT_LIMIT, or
-        * cooldown active after throttle codes -1003 / -1015
-        * per-symbol pacing: now - last_send_ns[sym] < HFT_EXEC_MIN_SEND_INTERVAL_*_US
+Trigger gating:
+- minimum interval gating
+- minimum mid move gating
+- minimum imbalance move gating
 
-  OMS (OmsState):
-    - Tracks per-order status: None, PendingNew, Live, PendingReplace, PendingCancel,
-      Rejected, Completed
-    - REST ack moves Pending* -> Live (or Completed on cancel ack)
-    - User stream events update terminal states (fills, cancel, reject)
+Readiness gating:
+- can require all symbols synchronized before global trading
+- can allow per-symbol readiness for partial trading
 
-  User stream parser:
-    - EVENT ORDER_TRADE_UPDATE: nested JSON object "o"
-    - Maps execution type x and order status X to ExecReport (Fill, Ack, Reject,
-      Canceled) + terminal when FILLED/CANCELED/EXPIRED etc.
-    - clientOrderId: strips hft_ prefix numeric for local id
-
-  Reconciliation (optional):
-    - Control thread fetches openOrders, counts "clientOrderId", and extracts
-      numeric local ids from "hft_<id>" clientOrderId values into shared atomics
-    - Main compares remote count vs OMS open estimate
-      (Live + PendingReplace + PendingCancel) -> rec_mismatch
-    - Optional healing (HFT_RECONCILE_HEAL=1): bounded per tick by
-      HFT_RECONCILE_HEAL_MAX_PER_TICK; drops missing live slots in OrderManager
-      and marks missing OMS Live orders Completed
-    - Pending-timeout correctness healing:
-        HFT_OMS_PENDING_TIMEOUT_MS + HFT_OMS_PENDING_HEAL_MAX_PER_TICK
-      If Pending* state exceeds timeout, reconcile snapshot decides correction:
-        * present in remote openOrders -> promote to Live
-        * absent in remote openOrders  -> mark Completed and drop OM slot
-    - Lifecycle timeout path is deterministic:
-        * event=lifecycle_timeout (age over HFT_LIFECYCLE_TIMEOUT_MS)
-        * followed by event=lifecycle_disposition with action:
-            timeout_rebind_remote OR timeout_terminalize_local
-      Reconcile-driven terminalization also emits lifecycle_disposition actions.
-
-  Snapshot robustness:
-    - Control thread retries snapshot fetch up to HFT_SNAPSHOT_RETRY_ATTEMPTS
-      with HFT_SNAPSHOT_RETRY_BACKOFF_MS delay before marking attempt failed
-    - Main-thread snapshot request scheduler applies per-symbol exponential cooldown
-      (capped by HFT_SNAPSHOT_RETRY_MAX_BACKOFF_MS) after repeated failures
+Outcome:
+- intent is converted to command(s) by order management policy
 
 --------------------------------------------------------------------------------
-6. PERSISTENCE AND TELEMETRY
+5) ORDER MANAGEMENT, RISK, AND EXECUTION
 --------------------------------------------------------------------------------
 
-  Exec audit (HFT_EXEC_AUDIT_LOG path, e.g. ./exec_audit.log):
-    - Hot path: snprintf + SPSC try_push (drops counted exec_audit_drop)
-    - Writer thread: line-buffered file append
+Order management:
+- baseline one active slot per `(symbol, side)`
+- emits `New`, `Replace`, `Cancel`
+- replace only when price delta crosses configured threshold
 
-  Stdout stats (roughly 1 Hz):
-    - MD: rx, consumed, drops, parse_reject, bookTicker/depth/aggTrade counts
-    - Strategy: signals, trigger_gated, readiness_gated, state
-    - Execution: exec_new/replace/sent, risk_reject, risk_kill, gateway_fail,
-      gw_last_http, gw_last_ix, exec_reports, exec_fills, exec_active
-    - PnL: pnl_mtm_total, pnl_mtm_btc/eth/sol, pnl_inv_btc/eth/sol,
-      pnl_dd_pause, pnl_dd_trip_btc/eth/sol
-    - OMS: oms_live, oms_invalid
-    - Book: depth_oos, snap_*, depth_buf*, parse/enqueue latency aggregates,
-      queue-to-strategy p50/p99
-    - Reconcile: rec_exch_open, rec_mismatch, rec_heal_om, rec_heal_oms,
-      rec_heal_pending, rec_heal_pending_om_drop, rec_http_fail
-    - MD liveness: ws_last_msg_age_ms, ws_reconnects, ws_idle_reconnects
-    - MD health logger: md_health_drop
-    - Readiness bits: synced_symbols, sync_btc/eth/sol, ready_btc/eth/sol
-    - REST weight: rest_mbx_wt_1m
+Cancel policies:
+- opposite-side-first cancel to reduce stale posture
+- stale timeout cancel
+- adverse-move cancel
+- optional adaptive tuning against target cancel-rate telemetry
 
-  Not implemented yet:
-    - Durable order/fill database, Parquet replay export, external metrics sink
+Pre-trade risk:
+- kill switch check
+- max order quantity
+- max notional
+- max projected absolute position
 
---------------------------------------------------------------------------------
-7. CONFIGURATION SUMMARY (see README.md for full list)
---------------------------------------------------------------------------------
-
-  BINANCE_MODE              demo | live  (endpoints + streams)
-  BINANCE_API_KEY / SECRET  signing + user stream + reconcile
-  HFT_KILL_SWITCH, SIGUSR1 toggle, HFT_EXEC_AUDIT_LOG, HFT_MD_HEALTH_LOG
-  HFT_WS_IDLE_RECONNECT_MS, HFT_WS_IDLE_RECONNECT_COOLDOWN_MS
-  HFT_RECONCILE_INTERVAL_SEC, HFT_CORE_RECONCILE
-  Risk limits, gateway retry, core pinning, RT FIFO, triggers, etc.
+Gateway:
+- signed Binance REST for new/replace/cancel
+- retry and backoff controls
+- tracks REST weight and throttle error codes
+- send-governor applies local pacing and cooldown logic
 
 --------------------------------------------------------------------------------
-8. WHAT IS IN GOOD SHAPE VS WHAT REMAINS
+6) OMS, USER STREAM, AND RECONCILIATION
 --------------------------------------------------------------------------------
 
-  In good shape:
-    - WS MD ingestion, parser, SPSC, L2 with snapshot repair
-    - Trigger-gated strategy hook, order intent -> command pipeline
-    - Signed REST New/Replace/Cancel shapes, user stream OMS alignment
-    - Pre-trade risk, kill switch, audit sink, openOrders reconcile scaffold
-    - Demo vs live endpoint selection
+OMS lifecycle:
+- states include pending, live, pending-cancel/replace, rejected, completed
+- transitions come from gateway acks and user-stream events
 
-  Remaining / next milestones (typical order):
-    1) Strategy <-> inventory: drive StrategyState.inventory from risk/OMS fills;
-       deliberate cancel/replace policy (timeouts, flatten, inventory target).
-    2) Gateway performance: TLS session reuse, optional backoff on -1003 using
-       rest_mbx_wt_1m and response codes.
-    3) Full reconciliation: heal OMS from REST when rec_mismatch; handle partial
-       fills vs OrderManager slots.
-    4) Production market making: quote sizing, skew bands, post-only, reduce-only
-       where needed; symbol-specific limits.
-    5) Persistence beyond text audit: queryable fills/orders for compliance and
-       replay.
-    6) Monitoring: histograms/alerts, not only stdout.
-    7) Phase B: second venue (e.g. Bybit), routing and hedge logic.
-    8) Tests: unit tests for parser, book, OMS transitions; integration against demo.
+User stream:
+- parses `ORDER_TRADE_UPDATE` payloads
+- maps exchange event/status into normalized exec reports
+- extracts local `hft_<id>` client order identifiers
+
+Reconciliation (optional but important):
+- control thread fetches remote open orders
+- main compares remote count/snapshot to local OMS/OrderManager estimate
+- mismatch counters are tracked
+- bounded healing can:
+  - clear local live slots absent remotely
+  - terminalize stale pending/live states after timeout logic
+
+--------------------------------------------------------------------------------
+7) PERSISTENCE AND TELEMETRY
+--------------------------------------------------------------------------------
+
+Persistence today:
+- append-only execution audit log via lock-free queue + writer thread
+- append-only market-data health log via separate queue + writer thread
+
+Runtime telemetry:
+- printed periodic stats include:
+  - market-data throughput and parse/drop counters
+  - queue/latency metrics (including queue-to-strategy percentiles)
+  - strategy gating and signal counters
+  - execution sends/failures/rejects/fills
+  - OMS and reconcile counters
+  - PnL and drawdown guard counters
+  - websocket liveness and reconnect counters
+
+Gaps:
+- no durable queryable order/fill store yet
+- no external metrics sink/alerts by default
+
+--------------------------------------------------------------------------------
+8) FAILURE MODEL AND SAFETY BEHAVIOR
+--------------------------------------------------------------------------------
+
+Expected failure classes and behavior:
+
+- Market-data continuity break
+  - symbol trading is gated
+  - snapshot reseed requested
+  - trading resumes only after reseed/in-sync criteria
+
+- User-stream delay/loss
+  - reconcile loop detects drift over time
+  - bounded healing corrects stale local lifecycle states
+
+- REST throttling / transport errors
+  - retry/backoff and local cooldown engage
+  - send governor limits further pressure
+
+- Risk breach or operator intervention
+  - pre-trade risk rejects command
+  - kill switch blocks further order sends
+
+- Control-path overload risk
+  - batch caps and per-tick heal limits bound work
+
+--------------------------------------------------------------------------------
+9) IMPLEMENTATION STATUS
+--------------------------------------------------------------------------------
+
+In good shape:
+- websocket MD ingestion, parse, normalization, lock-free handoff
+- L2 sequencing and snapshot-based continuity recovery
+- strategy trigger and intent pipeline with per-symbol knobs
+- pre-trade risk, kill switch, gateway transport basics
+- OMS integration with user stream and reconcile scaffolding
+- async audit and health logs
+
+Still evolving:
+- alpha quality and regime-adaptive quoting logic
+- deeper persistence/replay/analytics
+- production observability (dashboards, alerting, SLOs)
+- multi-venue routing and hedge execution
+
+For milestone sequencing, see `docs/NEXT_IMPLEMENTATION_STEPS.md`.
 
 ================================================================================
-End of architecture overview (align with code in repo; update when design changes).
+End of architecture document.
 ================================================================================
