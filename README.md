@@ -118,6 +118,7 @@ getcap ./alpha_engine
 - `docs/ARCHITECTURE.txt`: data flow, thread model, execution path, failure handling
 - `docs/ENVIRONMENT_VARIABLES.md`: meaning and use-case of every env variable
 - `docs/NEXT_IMPLEMENTATION_STEPS.md`: practical roadmap to real-money readiness
+- `docs/COMPONENT_TESTING_GUIDELINES.md`: component-by-component correctness testing blueprint
 
 ## Current Implementation Status
 
