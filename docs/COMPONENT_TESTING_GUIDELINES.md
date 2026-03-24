@@ -2,7 +2,7 @@
 
 This document defines *what to test* and *how to test* every major component before writing actual test code.
 
-For the `tests/` directory layout, build integration, and commands to run suites, see [`COMPONENT_TESTING_SUITE.md`](COMPONENT_TESTING_SUITE.md).
+For which tests exist and how to run them, see [`COMPONENT_TESTING_SUITE.md`](COMPONENT_TESTING_SUITE.md).
 
 ## Important Reality
 
