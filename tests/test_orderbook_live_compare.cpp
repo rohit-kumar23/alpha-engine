@@ -14,6 +14,7 @@
 #include <iostream>
 #include <mutex>
 #include <optional>
+#include <sstream>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -92,6 +93,7 @@ void append_dump_line(const std::filesystem::path& dir, std::mutex& dump_mu, con
 }
 
 void print_book_block(
+    std::ostream& out,
     std::string_view symbol,
     const L2Book& book,
     std::size_t max_levels,
@@ -102,27 +104,27 @@ void print_book_block(
     const std::size_t nb = book.copy_top_bid_levels(bids.data(), max_levels);
     const std::size_t na = book.copy_top_ask_levels(asks.data(), max_levels);
 
-    std::cout << "---- " << symbol << "  ready=" << (book.is_ready() ? "yes" : "no") << "  in_sync=" << (book.is_in_sync() ? "yes" : "no")
-              << "  resync=" << (book.resync_required() ? "yes" : "no") << "  last_update_id=" << book.last_update_id() << " ----\n";
-    std::cout << "  best_bid=" << std::fixed << std::setprecision(8) << top.best_bid << "  best_ask=" << top.best_ask
-              << "  spread=" << top.spread << "  (rows = depth side state; bookTicker may refresh best ahead of rows)\n";
-    std::cout << "  " << std::setw(14) << "BID px" << std::setw(16) << "BID qty" << "  |  " << std::setw(14) << "ASK px" << std::setw(16)
-              << "ASK qty\n";
+    out << "---- " << symbol << "  ready=" << (book.is_ready() ? "yes" : "no") << "  in_sync=" << (book.is_in_sync() ? "yes" : "no")
+        << "  resync=" << (book.resync_required() ? "yes" : "no") << "  last_update_id=" << book.last_update_id() << " ----\n";
+    out << "  best_bid=" << std::fixed << std::setprecision(8) << top.best_bid << "  best_ask=" << top.best_ask
+        << "  spread=" << top.spread << "  (rows = depth side state; bookTicker may refresh best ahead of rows)\n";
+    out << "  " << std::setw(14) << "BID px" << std::setw(16) << "BID qty" << "  |  " << std::setw(14) << "ASK px" << std::setw(16)
+        << "ASK qty\n";
     const std::size_t rows = std::max(nb, na);
-    std::cout << std::fixed << std::setprecision(8);
+    out << std::fixed << std::setprecision(8);
     for (std::size_t r = 0; r < rows; ++r) {
         if (r < nb) {
-            std::cout << "  " << std::setw(14) << bids[r].px << std::setw(16) << bids[r].qty;
+            out << "  " << std::setw(14) << bids[r].px << std::setw(16) << bids[r].qty;
         } else {
-            std::cout << "  " << std::setw(14) << "" << std::setw(16) << "";
+            out << "  " << std::setw(14) << "" << std::setw(16) << "";
         }
-        std::cout << "  |  ";
+        out << "  |  ";
         if (r < na) {
-            std::cout << std::setw(14) << asks[r].px << std::setw(16) << asks[r].qty;
+            out << std::setw(14) << asks[r].px << std::setw(16) << asks[r].qty;
         }
-        std::cout << '\n';
+        out << '\n';
     }
-    std::cout << '\n';
+    out << '\n';
 }
 
 } // namespace
@@ -234,23 +236,27 @@ int main(int argc, char** argv) {
 
     while (!g_stop.load(std::memory_order_relaxed)) {
         std::this_thread::sleep_for(std::chrono::milliseconds(refresh_ms));
+        std::ostringstream frame;
         if (clear_screen) {
-            std::cout << "\033[2J\033[H";
+            frame << "\033[3J\033[2J\033[H";
         }
-        std::cout << "[TEST_ORDERBOOK_LIVE_COMPARE] ws_text_frames=" << ws_frames.load(std::memory_order_relaxed)
+        {
+            std::lock_guard lock(book_mu);
+            frame << "[TEST_ORDERBOOK_LIVE_COMPARE] ws_text_frames=" << ws_frames.load(std::memory_order_relaxed)
                   << "  Ctrl+C to exit\n\n";
-        std::lock_guard lock(book_mu);
-        for (std::size_t i = 0; i < 3; ++i) {
-            if (!inst_on[i]) {
-                continue;
+            for (std::size_t i = 0; i < 3; ++i) {
+                if (!inst_on[i]) {
+                    continue;
+                }
+                print_book_block(
+                    frame,
+                    instrument_to_symbol(kInstruments[i]),
+                    books[i],
+                    static_cast<std::size_t>(kPrintLevelsPerSide),
+                    books[i].snapshot());
             }
-            print_book_block(
-                instrument_to_symbol(kInstruments[i]),
-                books[i],
-                static_cast<std::size_t>(kPrintLevelsPerSide),
-                books[i].snapshot());
         }
-        std::cout.flush();
+        std::cout << frame.str() << std::flush;
     }
 
     ws_stop.store(true, std::memory_order_relaxed);
