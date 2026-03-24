@@ -15,7 +15,11 @@ This file lists the **tests that exist**, **how to run** them, and **how to veri
 
 ## `test_marketdata_orderbook`
 
-### Run (CMake / CTest)
+Registered in CTest as **`marketdata_orderbook`**.
+
+### CMake / CTest
+
+Configure, build, and run the full test suite:
 
 ```bash
 cmake -S . -B build
@@ -23,13 +27,13 @@ cmake --build build -j
 ctest --test-dir build --output-on-failure
 ```
 
-Filter by registered test name:
+Only this test:
 
 ```bash
 ctest --test-dir build -R marketdata_orderbook --output-on-failure
 ```
 
-Run the executable:
+Run the built binary (from `build/`):
 
 ```bash
 ./build/test_marketdata_orderbook
@@ -37,43 +41,80 @@ Run the executable:
 ./build/test_marketdata_orderbook --ws-smoke
 ```
 
-### Run (Make)
+### Make
+
+Build the executable only:
 
 ```bash
 make test_marketdata_orderbook
-./test_marketdata_orderbook
+```
+
+Build (if needed) and run it:
+
+```bash
+make run_test_marketdata_orderbook
+```
+
+After a Make build, the binary is at the repo root:
+
+```bash
 ./test_marketdata_orderbook --verbose
 ./test_marketdata_orderbook --ws-smoke
 ```
 
+### Flags
+
 | Flag | Effect |
 |------|--------|
 | `--verbose` | More log detail (`[VERBOSE]`). |
-| `--ws-smoke` | Enables live network WebSocket smoke (omit in CI if you want fully offline runs). |
+| `--ws-smoke` | Live WebSocket smoke (network); omit for fully offline runs (e.g. CI). |
 
 ---
 
 ## `test_orderbook_live_compare`
 
-Not registered in CTest. Build and run explicitly when you want a **live** terminal book (defaults are built into the binary; no env vars).
+**Not** registered in CTest (build and run explicitly). Defaults are in the binary; no env vars.
 
-### Build
+### CMake / CTest
+
+Build:
 
 ```bash
+cmake -S . -B build
+cmake --build build -j
 cmake --build build --target test_orderbook_live_compare
 ```
 
-```bash
-make test_orderbook_live_compare
-```
-
-### Run
+Run the built binary:
 
 ```bash
 ./build/test_orderbook_live_compare
 ./build/test_orderbook_live_compare --live
 ./build/test_orderbook_live_compare --help
 ```
+
+### Make
+
+Build the executable only:
+
+```bash
+make test_orderbook_live_compare
+```
+
+Build (if needed) and run it:
+
+```bash
+make run_test_orderbook_live_compare
+```
+
+After a Make build, the binary is at the repo root:
+
+```bash
+./test_orderbook_live_compare --live
+./test_orderbook_live_compare --help
+```
+
+### Flags
 
 | Flag | Effect |
 |------|--------|

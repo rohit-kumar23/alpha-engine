@@ -54,23 +54,25 @@ TEST_ORDERBOOK_LIVE_COMPARE_OBJS := $(TEST_ORDERBOOK_LIVE_COMPARE_SRCS:.cpp=.o)
 
 # =============================================================================
 
-.PHONY: all run clean test_marketdata_orderbook test_orderbook_live_compare
+.PHONY: all run clean run_test_marketdata_orderbook run_test_orderbook_live_compare
 
 all: $(PRODUCTION_TARGET)
 
 $(PRODUCTION_TARGET): $(PRODUCTION_OBJS)
 	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS)
 
+# Build test executables (target name = output filename; must not duplicate a second recipe for the same name).
 $(TEST_MARKETDATA_ORDERBOOK_TARGET): $(TEST_MARKETDATA_ORDERBOOK_OBJS)
 	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS)
 
 $(TEST_ORDERBOOK_LIVE_COMPARE_TARGET): $(TEST_ORDERBOOK_LIVE_COMPARE_OBJS)
 	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS)
 
-test_marketdata_orderbook: $(TEST_MARKETDATA_ORDERBOOK_TARGET)
+# Build (if needed) and run — separate phony names avoid "overriding recipe" warnings.
+run_test_marketdata_orderbook: $(TEST_MARKETDATA_ORDERBOOK_TARGET)
 	./$(TEST_MARKETDATA_ORDERBOOK_TARGET)
 
-test_orderbook_live_compare: $(TEST_ORDERBOOK_LIVE_COMPARE_TARGET)
+run_test_orderbook_live_compare: $(TEST_ORDERBOOK_LIVE_COMPARE_TARGET)
 	./$(TEST_ORDERBOOK_LIVE_COMPARE_TARGET)
 
 %.o: %.cpp
