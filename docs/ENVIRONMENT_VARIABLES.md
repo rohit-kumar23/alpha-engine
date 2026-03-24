@@ -386,6 +386,10 @@ Many values are stored as integers to avoid floating point work in hot paths.
   - **Meaning:** Binance API secret for HMAC signing.
   - **Use case:** Required for authenticated trading/reconcile requests.
 
+## Test binaries
+
+`test_marketdata_orderbook` and `test_orderbook_live_compare` do **not** read environment variables for their own configuration; defaults and command-line flags are documented in [`COMPONENT_TESTING_SUITE.md`](COMPONENT_TESTING_SUITE.md).
+
 ## Recommended Profiles
 
 - **Local development:** Disable RT scheduling and memory lock, keep `BINANCE_MODE=demo`, conservative risk caps.

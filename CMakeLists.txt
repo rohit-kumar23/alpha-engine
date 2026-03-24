@@ -39,8 +39,8 @@ endif()
 # Tests — marketdata + orderbook (fixtures + optional live WebSocket smoke)
 # =============================================================================
 
-add_executable(run_marketdata_orderbook
-    tests/run_marketdata_orderbook.cpp
+add_executable(test_marketdata_orderbook
+    tests/test_marketdata_orderbook.cpp
     tests/marketdata/test_binance_parser.cpp
     tests/marketdata/test_ws_smoke.cpp
     tests/orderbook/test_l2_book.cpp
@@ -49,12 +49,31 @@ add_executable(run_marketdata_orderbook
     src/orderbook/l2_book.cpp
 )
 
-target_include_directories(run_marketdata_orderbook PRIVATE include ${CMAKE_SOURCE_DIR})
-target_link_libraries(run_marketdata_orderbook PRIVATE OpenSSL::SSL OpenSSL::Crypto pthread)
+target_include_directories(test_marketdata_orderbook PRIVATE include ${CMAKE_SOURCE_DIR})
+target_link_libraries(test_marketdata_orderbook PRIVATE OpenSSL::SSL OpenSSL::Crypto pthread)
 
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-    target_compile_options(run_marketdata_orderbook PRIVATE -O2 -Wall -Wextra -Wpedantic)
+    target_compile_options(test_marketdata_orderbook PRIVATE -O2 -Wall -Wextra -Wpedantic)
 endif()
 
 enable_testing()
-add_test(NAME marketdata_orderbook COMMAND run_marketdata_orderbook)
+add_test(NAME marketdata_orderbook COMMAND test_marketdata_orderbook)
+
+# =============================================================================
+# Tests — orderbook live UI compare (optional; not part of CTest)
+# =============================================================================
+
+add_executable(test_orderbook_live_compare
+    tests/test_orderbook_live_compare.cpp
+    src/marketdata/binance_parser.cpp
+    src/marketdata/binance_ws_client.cpp
+    src/marketdata/binance_snapshot_client.cpp
+    src/orderbook/l2_book.cpp
+)
+
+target_include_directories(test_orderbook_live_compare PRIVATE include ${CMAKE_SOURCE_DIR})
+target_link_libraries(test_orderbook_live_compare PRIVATE OpenSSL::SSL OpenSSL::Crypto pthread)
+
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(test_orderbook_live_compare PRIVATE -O2 -Wall -Wextra -Wpedantic)
+endif()

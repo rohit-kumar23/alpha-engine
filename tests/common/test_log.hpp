@@ -1,6 +1,5 @@
 #pragma once
 
-#include <cstdlib>
 #include <iostream>
 #include <string_view>
 
@@ -49,13 +48,5 @@ private:
     int passed_{};
     int failed_{};
 };
-
-inline bool env_flag(const char* name) {
-    const char* v = std::getenv(name);
-    if (v == nullptr || v[0] == '\0') {
-        return false;
-    }
-    return v[0] == '1' || v[0] == 'y' || v[0] == 'Y' || v[0] == 't' || v[0] == 'T';
-}
 
 } // namespace tests

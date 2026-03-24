@@ -284,4 +284,28 @@ std::uint64_t L2Book::last_update_id() const {
     return last_final_update_id_;
 }
 
+std::size_t L2Book::copy_top_bid_levels(BookLevelView* out, std::size_t max_levels) const {
+    if (out == nullptr || max_levels == 0) {
+        return 0;
+    }
+    const std::size_t n = std::min<std::size_t>(max_levels, bid_count_);
+    for (std::size_t i = 0; i < n; ++i) {
+        out[i].px = bids_[i].px;
+        out[i].qty = bids_[i].qty;
+    }
+    return n;
+}
+
+std::size_t L2Book::copy_top_ask_levels(BookLevelView* out, std::size_t max_levels) const {
+    if (out == nullptr || max_levels == 0) {
+        return 0;
+    }
+    const std::size_t n = std::min<std::size_t>(max_levels, ask_count_);
+    for (std::size_t i = 0; i < n; ++i) {
+        out[i].px = asks_[i].px;
+        out[i].qty = asks_[i].qty;
+    }
+    return n;
+}
+
 } // namespace hft::orderbook

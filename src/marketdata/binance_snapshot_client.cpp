@@ -119,11 +119,18 @@ std::size_t parse_levels(
         if (close == std::string_view::npos) {
             break;
         }
-        const auto next_open = json.find('[', close + 1);
-        if (next_open == std::string_view::npos || json[next_open - 1] == ']') {
+        std::size_t probe = close + 1;
+        while (probe < json.size() && (json[probe] == ' ' || json[probe] == '\t' || json[probe] == '\n' ||
+                                       json[probe] == '\r' || json[probe] == ',')) {
+            ++probe;
+        }
+        if (probe >= json.size() || json[probe] == ']') {
             break;
         }
-        pos = next_open;
+        if (json[probe] != '[') {
+            break;
+        }
+        pos = probe;
     }
     return count;
 }

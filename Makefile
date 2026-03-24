@@ -25,12 +25,12 @@ PRODUCTION_SRCS := \
 PRODUCTION_OBJS := $(PRODUCTION_SRCS:.cpp=.o)
 
 # =============================================================================
-# Tests — marketdata + orderbook
+# Tests — marketdata + orderbook (offline + optional smoke)
 # =============================================================================
 
-TEST_MARKETDATA_ORDERBOOK_TARGET := run_marketdata_orderbook
+TEST_MARKETDATA_ORDERBOOK_TARGET := test_marketdata_orderbook
 TEST_MARKETDATA_ORDERBOOK_SRCS := \
-	tests/run_marketdata_orderbook.cpp \
+	tests/test_marketdata_orderbook.cpp \
 	tests/marketdata/test_binance_parser.cpp \
 	tests/marketdata/test_ws_smoke.cpp \
 	tests/orderbook/test_l2_book.cpp \
@@ -40,8 +40,21 @@ TEST_MARKETDATA_ORDERBOOK_SRCS := \
 TEST_MARKETDATA_ORDERBOOK_OBJS := $(TEST_MARKETDATA_ORDERBOOK_SRCS:.cpp=.o)
 
 # =============================================================================
+# Tests — orderbook live UI compare (optional; run via test_orderbook_live_compare)
+# =============================================================================
 
-.PHONY: all run clean test test_marketdata_orderbook
+TEST_ORDERBOOK_LIVE_COMPARE_TARGET := test_orderbook_live_compare
+TEST_ORDERBOOK_LIVE_COMPARE_SRCS := \
+	tests/test_orderbook_live_compare.cpp \
+	src/marketdata/binance_parser.cpp \
+	src/marketdata/binance_ws_client.cpp \
+	src/marketdata/binance_snapshot_client.cpp \
+	src/orderbook/l2_book.cpp
+TEST_ORDERBOOK_LIVE_COMPARE_OBJS := $(TEST_ORDERBOOK_LIVE_COMPARE_SRCS:.cpp=.o)
+
+# =============================================================================
+
+.PHONY: all run clean test_marketdata_orderbook test_orderbook_live_compare
 
 all: $(PRODUCTION_TARGET)
 
@@ -51,10 +64,14 @@ $(PRODUCTION_TARGET): $(PRODUCTION_OBJS)
 $(TEST_MARKETDATA_ORDERBOOK_TARGET): $(TEST_MARKETDATA_ORDERBOOK_OBJS)
 	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS)
 
+$(TEST_ORDERBOOK_LIVE_COMPARE_TARGET): $(TEST_ORDERBOOK_LIVE_COMPARE_OBJS)
+	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS)
+
 test_marketdata_orderbook: $(TEST_MARKETDATA_ORDERBOOK_TARGET)
 	./$(TEST_MARKETDATA_ORDERBOOK_TARGET)
 
-test: test_marketdata_orderbook
+test_orderbook_live_compare: $(TEST_ORDERBOOK_LIVE_COMPARE_TARGET)
+	./$(TEST_ORDERBOOK_LIVE_COMPARE_TARGET)
 
 %.o: %.cpp
 	$(CXX) $(CXXFLAGS) -c $< -o $@
@@ -65,4 +82,5 @@ run: $(PRODUCTION_TARGET)
 clean:
 	rm -f $(PRODUCTION_OBJS) $(PRODUCTION_TARGET) \
 		$(TEST_MARKETDATA_ORDERBOOK_OBJS) $(TEST_MARKETDATA_ORDERBOOK_TARGET) \
+		$(TEST_ORDERBOOK_LIVE_COMPARE_OBJS) $(TEST_ORDERBOOK_LIVE_COMPARE_TARGET) \
 		src/*.o src/*/*.o src/*/*/*.o tests/*.o tests/*/*.o tests/*/*/*.o

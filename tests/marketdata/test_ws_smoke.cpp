@@ -2,7 +2,6 @@
 
 #include <atomic>
 #include <chrono>
-#include <cstdlib>
 #include <string>
 #include <thread>
 
@@ -12,22 +11,18 @@
 
 namespace tests::marketdata {
 
-int run_ws_smoke_test(tests::TestLog& log) {
-    if (!tests::env_flag("ALPHA_ENGINE_WS_SMOKE")) {
-        log.info("WS smoke skipped (set ALPHA_ENGINE_WS_SMOKE=1 to run live connectivity check)");
+int run_ws_smoke_test(tests::TestLog& log, bool enable) {
+    if (!enable) {
+        log.info("WS smoke skipped (pass --ws-smoke on test_marketdata_orderbook to run live connectivity check)");
         return 0;
     }
 
     const auto ep =
         hft::marketdata::futures_endpoints(hft::marketdata::BinanceExecutionMode::Live);
-    const char* host_env = std::getenv("BINANCE_STREAM_WS_HOST");
-    const char* port_env = std::getenv("BINANCE_STREAM_WS_PORT");
-    std::string host =
-        (host_env != nullptr && host_env[0] != '\0') ? host_env : ep.stream_ws_host;
-    std::string port =
-        (port_env != nullptr && port_env[0] != '\0') ? port_env : ep.stream_ws_port;
+    std::string host = ep.stream_ws_host;
+    std::string port = ep.stream_ws_port;
 
-    log.info("WS smoke: combined futures stream (override BINANCE_STREAM_WS_HOST / BINANCE_STREAM_WS_PORT if needed)");
+    log.info("WS smoke: combined futures stream (live endpoints)");
 
     std::atomic<bool> stop{false};
     std::atomic<int> msgs{0};

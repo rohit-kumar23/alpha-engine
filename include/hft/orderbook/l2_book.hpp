@@ -26,6 +26,14 @@ public:
     bool needs_snapshot_seed() const;
     std::uint64_t last_update_id() const;
 
+    // Read-only depth view for offline diagnostics / manual UI comparison. Not referenced by alpha_engine hot path.
+    struct BookLevelView {
+        double px {};
+        double qty {};
+    };
+    std::size_t copy_top_bid_levels(BookLevelView* out, std::size_t max_levels) const;
+    std::size_t copy_top_ask_levels(BookLevelView* out, std::size_t max_levels) const;
+
 private:
     static constexpr std::size_t kMaxBookLevels = 32;
 
