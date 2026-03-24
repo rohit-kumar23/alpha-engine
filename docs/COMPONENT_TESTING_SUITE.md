@@ -13,14 +13,14 @@ Keep tests close to the domain they exercise. Use **full words** in file and bin
 
 ```text
 tests/
-  common/                    # Shared helpers (logging harness, later: fixtures, matchers)
+  common/                         # Shared helpers (logging harness, later: fixtures, matchers)
     test_log.hpp
-  marketdata/                # marketdata unit/integration tests
+  marketdata/                     # marketdata unit/integration tests
     test_binance_parser.cpp
     test_ws_smoke.cpp
-  orderbook/                 # orderbook tests
+  orderbook/                      # orderbook tests
     test_l2_book.cpp
-  run_marketdata_orderbook.cpp   # Entry point: registers and runs the suites above
+  run_marketdata_orderbook.cpp    # Entry point: registers and runs the suites above
 ```
 
 Guidelines:
