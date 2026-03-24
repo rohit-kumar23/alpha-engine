@@ -5,7 +5,7 @@
 Design goals:
 
 - keep hot-path logic in-memory and deterministic
-- isolate domains (`md`, `book`, `strategy`, `execution`, `risk`, `oms`, `infra`)
+- isolate domains (`marketdata`, `orderbook`, `execution`, `ordermgmt`, `riskmgmt`, `coreinfra`, `strategy`, `analytics`)
 - minimize jitter with explicit threading, affinity, and bounded control-path work
 - build for operational safety first, then scale alpha complexity
 
@@ -30,6 +30,32 @@ Parallel control paths:
 - async audit and MD-health log writers
 
 For detailed internals, read `docs/ARCHITECTURE.txt`.
+
+## Codebase Layout
+
+```text
+include/hft/
+  analytics/        # PnL and analytics interfaces
+  orderbook/        # L2 book model
+  execution/        # Exchange execution adapters and stream decoding
+  coreinfra/        # Lock-free queues, async log sink utilities
+  marketdata/       # Exchange market-data clients and parser types
+  ordermgmt/        # Order lifecycle/state manager and order manager
+  riskmgmt/         # Pre-trade risk controls
+  strategy/         # Strategy interfaces and models
+  types.hpp         # Shared core domain types
+
+src/
+  analytics/        # PnL engine implementation
+  application/      # process bootstrap, thread wiring, main loop
+  orderbook/        # L2 book implementation
+  execution/        # execution adapter implementations
+  coreinfra/        # infrastructure implementations
+  marketdata/       # market-data implementations
+  ordermgmt/        # order state and order manager implementation
+  riskmgmt/         # risk implementation
+  strategy/         # strategy implementations
+```
 
 ## Build and Run
 

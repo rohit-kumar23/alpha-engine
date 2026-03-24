@@ -20,7 +20,7 @@
 #include <openssl/hmac.h>
 #include <openssl/ssl.h>
 
-#include "hft/md/binance_types.hpp"
+#include "hft/marketdata/binance_types.hpp"
 
 namespace hft::execution {
 
@@ -30,8 +30,8 @@ const char* side_str(Side side) {
     return side == Side::Buy ? "BUY" : "SELL";
 }
 
-const char* cmd_symbol(md::Instrument i) {
-    using md::Instrument;
+const char* cmd_symbol(marketdata::Instrument i) {
+    using marketdata::Instrument;
     switch (i) {
         case Instrument::BtcUsdt:
             return "BTCUSDT";
@@ -44,8 +44,8 @@ const char* cmd_symbol(md::Instrument i) {
     }
 }
 
-std::size_t instrument_idx(md::Instrument i) {
-    using md::Instrument;
+std::size_t instrument_idx(marketdata::Instrument i) {
+    using marketdata::Instrument;
     switch (i) {
         case Instrument::BtcUsdt:
             return 0;
@@ -58,8 +58,8 @@ std::size_t instrument_idx(md::Instrument i) {
     }
 }
 
-double fallback_min_notional(md::Instrument i) {
-    using md::Instrument;
+double fallback_min_notional(marketdata::Instrument i) {
+    using marketdata::Instrument;
     switch (i) {
         case Instrument::BtcUsdt:
             return 100.0;
@@ -72,8 +72,8 @@ double fallback_min_notional(md::Instrument i) {
     }
 }
 
-SymbolConstraints fallback_constraints(md::Instrument i) {
-    using md::Instrument;
+SymbolConstraints fallback_constraints(marketdata::Instrument i) {
+    using marketdata::Instrument;
     switch (i) {
         case Instrument::BtcUsdt:
             return SymbolConstraints{0.10, 0.001, fallback_min_notional(i), 1, 3, true};
@@ -316,20 +316,20 @@ BinanceGateway::BinanceGateway(GatewayConfig config) : config_(std::move(config)
             recv_window_ms_ = static_cast<std::uint32_t>(parsed);
         }
     }
-    constraints_[0] = fallback_constraints(md::Instrument::BtcUsdt);
-    constraints_[1] = fallback_constraints(md::Instrument::EthUsdt);
-    constraints_[2] = fallback_constraints(md::Instrument::SolUsdt);
+    constraints_[0] = fallback_constraints(marketdata::Instrument::BtcUsdt);
+    constraints_[1] = fallback_constraints(marketdata::Instrument::EthUsdt);
+    constraints_[2] = fallback_constraints(marketdata::Instrument::SolUsdt);
     load_exchange_constraints();
 }
 
-GatewaySendResult BinanceGateway::send(const OrderCommand& cmd) {
+GatewaySendResult BinanceGateway::send(const ordermgmt::OrderCommand& cmd) {
     GatewaySendResult last {};
     const std::string endpoint = "/fapi/v1/order";
 
     std::string method = "POST";
-    if (cmd.type == CommandType::Replace) {
+    if (cmd.type == ordermgmt::CommandType::Replace) {
         method = "PUT";
-    } else if (cmd.type == CommandType::Cancel) {
+    } else if (cmd.type == ordermgmt::CommandType::Cancel) {
         method = "DELETE";
     }
 
@@ -348,14 +348,14 @@ GatewaySendResult BinanceGateway::send(const OrderCommand& cmd) {
         }
         const std::string signed_query = query + "&signature=" + signature;
         last = send_https_signed(method, endpoint, signed_query);
-        if (!last.ok && cmd.type == CommandType::Cancel && last.binance_error_code == -2011) {
+        if (!last.ok && cmd.type == ordermgmt::CommandType::Cancel && last.binance_error_code == -2011) {
             // Cancel of already-closed/missing order is idempotent for local state progression.
             last.ok = true;
             last.http_status = 200;
             last.binance_error_code = 0;
             return last;
         }
-        if (!last.ok && cmd.type == CommandType::New &&
+        if (!last.ok && cmd.type == ordermgmt::CommandType::New &&
             (last.binance_error_code == -4115 || last.binance_error_code == -4116)) {
             // Duplicate/invalid client order id can happen when transport retry replays
             // a request that was already accepted upstream.
@@ -378,7 +378,7 @@ GatewaySendResult BinanceGateway::send(const OrderCommand& cmd) {
     return last;
 }
 
-std::string BinanceGateway::build_query(const OrderCommand& cmd) const {
+std::string BinanceGateway::build_query(const ordermgmt::OrderCommand& cmd) const {
     const char* symbol = cmd_symbol(cmd.instrument);
     if (symbol[0] == '\0') {
         return {};
@@ -391,12 +391,12 @@ std::string BinanceGateway::build_query(const OrderCommand& cmd) const {
     normalize_order_price_qty(rules, cmd.price, cmd.qty, px, qty);
     std::ostringstream oss;
 
-    if (cmd.type == CommandType::Cancel) {
+    if (cmd.type == ordermgmt::CommandType::Cancel) {
         oss << "symbol=" << symbol << "&origClientOrderId=hft_" << cmd.client_order_id << "&recvWindow=" << recv_window_ms_
             << "&timestamp=" << ts_ms;
         return oss.str();
     }
-    if (cmd.type == CommandType::Replace) {
+    if (cmd.type == ordermgmt::CommandType::Replace) {
         oss << "symbol=" << symbol << "&side=" << side_str(cmd.side) << "&type=LIMIT"
             << "&timeInForce=GTC"
             << "&quantity=" << std::fixed << std::setprecision(rules.qty_dp) << qty
@@ -600,13 +600,13 @@ void BinanceGateway::load_exchange_constraints() {
         return;
     }
     struct SymDef {
-        md::Instrument inst;
+        marketdata::Instrument inst;
         const char* symbol;
     };
     constexpr std::array<SymDef, 3> syms {{
-        {md::Instrument::BtcUsdt, "BTCUSDT"},
-        {md::Instrument::EthUsdt, "ETHUSDT"},
-        {md::Instrument::SolUsdt, "SOLUSDT"},
+        {marketdata::Instrument::BtcUsdt, "BTCUSDT"},
+        {marketdata::Instrument::EthUsdt, "ETHUSDT"},
+        {marketdata::Instrument::SolUsdt, "SOLUSDT"},
     }};
     for (const auto& s : syms) {
         const std::string needle_compact = std::string("\"symbol\":\"") + s.symbol + "\"";
@@ -637,7 +637,7 @@ void BinanceGateway::load_exchange_constraints() {
     }
 }
 
-SymbolConstraints BinanceGateway::symbol_constraints(md::Instrument instrument) const {
+SymbolConstraints BinanceGateway::symbol_constraints(marketdata::Instrument instrument) const {
     return constraints_[instrument_idx(instrument)];
 }
 

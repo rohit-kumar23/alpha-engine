@@ -4,7 +4,7 @@
 #include <optional>
 #include <string_view>
 
-#include "hft/md/binance_types.hpp"
+#include "hft/marketdata/binance_types.hpp"
 #include "hft/types.hpp"
 
 namespace hft::execution {
@@ -19,7 +19,7 @@ enum class ExecEventType : unsigned char {
 struct ExecReport {
     ExecEventType type {ExecEventType::Ack};
     std::uint64_t client_order_id {};
-    md::Instrument instrument {md::Instrument::Unknown};
+    marketdata::Instrument instrument {marketdata::Instrument::Unknown};
     Side side {Side::Buy};
     double last_fill_qty {};
     double last_fill_price {};

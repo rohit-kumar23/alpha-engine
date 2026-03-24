@@ -180,11 +180,11 @@ std::optional<ExecReport> UserStreamParser::parse_order_trade_update(std::string
     const auto sym = str_field(blob, "s");
     if (sym.has_value()) {
         if (str_ieq(*sym, "BTCUSDT")) {
-            report.instrument = md::Instrument::BtcUsdt;
+            report.instrument = marketdata::Instrument::BtcUsdt;
         } else if (str_ieq(*sym, "ETHUSDT")) {
-            report.instrument = md::Instrument::EthUsdt;
+            report.instrument = marketdata::Instrument::EthUsdt;
         } else if (str_ieq(*sym, "SOLUSDT")) {
-            report.instrument = md::Instrument::SolUsdt;
+            report.instrument = marketdata::Instrument::SolUsdt;
         }
     }
     return report;

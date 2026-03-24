@@ -6,8 +6,8 @@
 #include <cstdint>
 #include <string>
 
-#include "hft/execution/order_manager.hpp"
-#include "hft/md/binance_types.hpp"
+#include "hft/ordermgmt/order_manager.hpp"
+#include "hft/marketdata/binance_types.hpp"
 
 namespace hft::execution {
 
@@ -65,12 +65,12 @@ inline void normalize_order_price_qty(
 class BinanceGateway {
 public:
     explicit BinanceGateway(GatewayConfig config);
-    GatewaySendResult send(const OrderCommand& cmd);
+    GatewaySendResult send(const ordermgmt::OrderCommand& cmd);
     GatewayRestResult signed_open_orders() const;
-    SymbolConstraints symbol_constraints(md::Instrument instrument) const;
+    SymbolConstraints symbol_constraints(marketdata::Instrument instrument) const;
 
 private:
-    std::string build_query(const OrderCommand& cmd) const;
+    std::string build_query(const ordermgmt::OrderCommand& cmd) const;
     std::string sign_query(const std::string& query) const;
     GatewayRestResult https_request(const std::string& method, const std::string& path, const std::string& entity_body) const;
     GatewaySendResult send_https_signed(const std::string& method, const std::string& endpoint, const std::string& signed_query) const;
