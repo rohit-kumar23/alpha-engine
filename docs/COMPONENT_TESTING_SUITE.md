@@ -1,6 +1,6 @@
 # Component testing suite
 
-This file lists the **tests that exist**, **how to run** them, and **how to verify** results. Deeper “what to test per component” lives in [`COMPONENT_TESTING_GUIDELINES.md`](COMPONENT_TESTING_GUIDELINES.md).
+This file lists the **tests that exist**, **how to run** them, and **how to verify** results.
 
 ## What is covered
 
