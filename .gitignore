@@ -9,6 +9,9 @@ install_manifest.txt
 alpha_engine
 test_marketdata
 test_orderbook
+test_strategy
+test_ordermgmt
+test_analytics
 *.o
 *.obj
 *.so

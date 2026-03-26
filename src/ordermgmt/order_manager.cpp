@@ -37,6 +37,70 @@ std::optional<OrderCommand> OrderManager::on_quote(marketdata::Instrument instru
         cancel_stale_ms_by_symbol_[sym_idx] > 0 ? cancel_stale_ms_by_symbol_[sym_idx] : cancel_stale_ms_;
     const std::uint32_t adverse_bps_x1000 = adverse_cancel_bps_x1000_by_symbol_[sym_idx];
 
+    enum class Priority : std::uint8_t {
+        None = 0,
+        New = 1,
+        Replace = 2,
+        CancelMissingLeg = 3,
+        CancelStale = 4,
+        CancelAdverse = 5,
+    };
+
+    auto side_priority = [&](Side side, const std::optional<OrderIntent>& intent_opt) -> Priority {
+        OrderSlot* existing = nullptr;
+        for (auto& slot : slots_) {
+            if (!slot.live) continue;
+            if (slot.instrument == instrument && slot.side == side) {
+                existing = &slot;
+                break;
+            }
+        }
+
+        if (!intent_opt.has_value()) {
+            if (existing != nullptr && !existing->cancel_inflight) {
+                return Priority::CancelMissingLeg;
+            }
+            return Priority::None;
+        }
+
+        const OrderIntent& intent = *intent_opt;
+        if (existing == nullptr) {
+            return (intent.qty > 0.0 && intent.price > 0.0) ? Priority::New : Priority::None;
+        }
+
+        if (stale_ms > 0 && !existing->cancel_inflight) {
+            const std::uint64_t stale_ns = static_cast<std::uint64_t>(stale_ms) * 1000000ULL;
+            const bool stale = ts_ns > existing->ts_last_update_ns &&
+                (ts_ns - existing->ts_last_update_ns) >= stale_ns;
+            if (stale) {
+                return Priority::CancelStale;
+            }
+        }
+
+        if (adverse_bps_x1000 > 0 && !existing->cancel_inflight) {
+            const double base_px = existing->price > 0.0 ? existing->price : intent.price;
+            if (base_px > 0.0) {
+                const double adverse_move = side == Side::Buy
+                    ? (existing->price - intent.price)
+                    : (intent.price - existing->price);
+                if (adverse_move > 0.0) {
+                    const double adverse_bps_calc_x1000 = (adverse_move / base_px) * 1.0e7;
+                    if (adverse_bps_calc_x1000 >= static_cast<double>(adverse_bps_x1000)) {
+                        return Priority::CancelAdverse;
+                    }
+                }
+            }
+        }
+
+        const double base_px = existing->price > 0.0 ? existing->price : intent.price;
+        const double px_diff = std::abs(intent.price - existing->price);
+        const double px_bps_x1000 = base_px > 0.0 ? (px_diff / base_px) * 1.0e7 : 0.0;
+        const bool qty_changed = std::abs(intent.qty - existing->qty) > 1e-12;
+        const bool should_replace =
+            qty_changed || px_bps_x1000 >= static_cast<double>(replace_threshold_bps_x1000_);
+        return (!existing->cancel_inflight && should_replace) ? Priority::Replace : Priority::None;
+    };
+
     auto eval_side = [&](Side side, const std::optional<OrderIntent>& intent_opt) -> std::optional<OrderCommand> {
         OrderSlot* existing = nullptr;
         OrderSlot* free_slot = nullptr;
@@ -165,25 +229,28 @@ std::optional<OrderCommand> OrderManager::on_quote(marketdata::Instrument instru
         };
     };
 
-    const bool buy_first = prefer_buy_first_[sym_idx];
-    if (buy_first) {
-        if (const auto cmd = eval_side(Side::Buy, quote.bid); cmd.has_value()) {
-            prefer_buy_first_[sym_idx] = false;
-            return cmd;
-        }
-        if (const auto cmd = eval_side(Side::Sell, quote.ask); cmd.has_value()) {
-            prefer_buy_first_[sym_idx] = true;
-            return cmd;
-        }
-        return std::nullopt;
+    const Priority buy_pri = side_priority(Side::Buy, quote.bid);
+    const Priority sell_pri = side_priority(Side::Sell, quote.ask);
+    const bool prefer_buy = prefer_buy_first_[sym_idx];
+    Side first = Side::Buy;
+    Side second = Side::Sell;
+    if (static_cast<std::uint8_t>(sell_pri) > static_cast<std::uint8_t>(buy_pri)) {
+        first = Side::Sell;
+        second = Side::Buy;
+    } else if (static_cast<std::uint8_t>(buy_pri) == static_cast<std::uint8_t>(sell_pri)) {
+        first = prefer_buy ? Side::Buy : Side::Sell;
+        second = prefer_buy ? Side::Sell : Side::Buy;
     }
-    if (const auto cmd = eval_side(Side::Sell, quote.ask); cmd.has_value()) {
-        prefer_buy_first_[sym_idx] = true;
-        return cmd;
+
+    const auto first_cmd = first == Side::Buy ? eval_side(Side::Buy, quote.bid) : eval_side(Side::Sell, quote.ask);
+    if (first_cmd.has_value()) {
+        prefer_buy_first_[sym_idx] = (first == Side::Sell);
+        return first_cmd;
     }
-    if (const auto cmd = eval_side(Side::Buy, quote.bid); cmd.has_value()) {
-        prefer_buy_first_[sym_idx] = false;
-        return cmd;
+    const auto second_cmd = second == Side::Buy ? eval_side(Side::Buy, quote.bid) : eval_side(Side::Sell, quote.ask);
+    if (second_cmd.has_value()) {
+        prefer_buy_first_[sym_idx] = (second == Side::Sell);
+        return second_cmd;
     }
     return std::nullopt;
 }

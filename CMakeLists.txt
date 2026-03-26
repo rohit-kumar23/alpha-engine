@@ -14,6 +14,7 @@ find_package(OpenSSL REQUIRED)
 add_executable(alpha_engine
     src/application/main.cpp
     src/analytics/pnl_engine.cpp
+    src/analytics/position_seed.cpp
     src/orderbook/l2_book.cpp
     src/execution/binance_gateway.cpp
     src/execution/binance_user_stream.cpp
@@ -104,7 +105,10 @@ add_test(NAME ordermgmt COMMAND test_ordermgmt)
 add_executable(test_analytics
     tests/test_analytics.cpp
     tests/analytics/test_pnl_engine.cpp
+    tests/analytics/test_position_seed.cpp
     src/analytics/pnl_engine.cpp
+    src/analytics/position_seed.cpp
+    src/riskmgmt/pre_trade_risk.cpp
 )
 
 target_include_directories(test_analytics PRIVATE include ${CMAKE_SOURCE_DIR})

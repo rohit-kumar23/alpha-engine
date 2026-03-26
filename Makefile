@@ -10,6 +10,7 @@ PRODUCTION_TARGET := alpha_engine
 PRODUCTION_SRCS := \
 	src/application/main.cpp \
 	src/analytics/pnl_engine.cpp \
+	src/analytics/position_seed.cpp \
 	src/orderbook/l2_book.cpp \
 	src/execution/binance_gateway.cpp \
 	src/execution/binance_user_stream.cpp \
@@ -72,7 +73,10 @@ TEST_ANALYTICS_TARGET := test_analytics
 TEST_ANALYTICS_SRCS := \
 	tests/test_analytics.cpp \
 	tests/analytics/test_pnl_engine.cpp \
-	src/analytics/pnl_engine.cpp
+	tests/analytics/test_position_seed.cpp \
+	src/analytics/pnl_engine.cpp \
+	src/analytics/position_seed.cpp \
+	src/riskmgmt/pre_trade_risk.cpp
 TEST_ANALYTICS_OBJS := $(TEST_ANALYTICS_SRCS:.cpp=.o)
 
 # =============================================================================

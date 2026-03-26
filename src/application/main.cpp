@@ -34,6 +34,7 @@
 #include "hft/marketdata/binance_ws_client.hpp"
 #include "hft/ordermgmt/order_state.hpp"
 #include "hft/analytics/pnl_engine.hpp"
+#include "hft/analytics/position_seed.hpp"
 #include "hft/riskmgmt/pre_trade_risk.hpp"
 #include "hft/strategy/market_maker.hpp"
 
@@ -109,34 +110,6 @@ std::size_t extract_json_client_order_ids(
         pos = value_end + 1;
     }
     return n;
-}
-
-double extract_position_field_for_symbol(std::string_view body, std::string_view symbol, std::string_view key) {
-    const std::string needle = std::string("\"symbol\":\"") + std::string(symbol) + "\"";
-    std::size_t pos = body.find(needle);
-    if (pos == std::string_view::npos) {
-        return 0.0;
-    }
-    const std::size_t end = body.find("\"symbol\":", pos + needle.size());
-    const std::string_view block =
-        end == std::string_view::npos ? body.substr(pos) : body.substr(pos, end - pos);
-    const std::string key_needle = std::string("\"") + std::string(key) + "\":\"";
-    const std::size_t kpos = block.find(key_needle);
-    if (kpos == std::string_view::npos) {
-        return 0.0;
-    }
-    const std::size_t vstart = kpos + key_needle.size();
-    const std::size_t vend = block.find('"', vstart);
-    if (vend == std::string_view::npos) {
-        return 0.0;
-    }
-    const std::string val(block.substr(vstart, vend - vstart));
-    char* parse_end = nullptr;
-    const double out = std::strtod(val.c_str(), &parse_end);
-    if (parse_end == val.c_str() || *parse_end != '\0') {
-        return 0.0;
-    }
-    return out;
 }
 
 std::uint64_t now_ns() {
@@ -984,25 +957,25 @@ int main() {
         static_cast<std::uint64_t>(pnl_cooldown_sec_sol > 0 ? pnl_cooldown_sec_sol : 0) * 1000000000ULL,
     };
     if (preflight_position_risk.ok) {
-        constexpr std::array<const char*, 3> kSymbols {"BTCUSDT", "ETHUSDT", "SOLUSDT"};
-        constexpr std::array<Instrument, 3> kInstruments {
-            Instrument::BtcUsdt,
-            Instrument::EthUsdt,
-            Instrument::SolUsdt,
-        };
-        for (std::size_t i = 0; i < kInstruments.size(); ++i) {
-            const double pos = extract_position_field_for_symbol(preflight_position_risk.body, kSymbols[i], "positionAmt");
-            const double entry = extract_position_field_for_symbol(preflight_position_risk.body, kSymbols[i], "entryPrice");
-            risk.set_position(kInstruments[i], pos);
-            pnl_states[i].inventory = pos;
-            pnl_states[i].avg_price = (std::abs(pos) > 1e-12) ? entry : 0.0;
-            pnl_peak_by_symbol[i] = pnl_engine.mark_to_market(
-                pnl_states[i],
-                pnl_states[i].avg_price > 0.0 ? pnl_states[i].avg_price : 1.0);
-            std::cout << "preflight kind=position_seed sym=" << kSymbols[i]
-                      << " pos=" << pos
-                      << " entry=" << pnl_states[i].avg_price
-                      << '\n';
+        std::array<hft::analytics::PositionSeed, 3> seeds {};
+        const std::size_t seeded = hft::analytics::parse_position_risk_seeds(preflight_position_risk.body, seeds);
+        hft::analytics::apply_position_seeds(seeds, risk, pnl_states);
+        if (seeded > 0) {
+            constexpr std::array<const char*, 3> kSymbols {"BTCUSDT", "ETHUSDT", "SOLUSDT"};
+            for (std::size_t i = 0; i < seeds.size(); ++i) {
+                if (!seeds[i].present) {
+                    continue;
+                }
+                const double pos = seeds[i].position;
+                const double entry = pnl_states[i].avg_price;
+                pnl_peak_by_symbol[i] = pnl_engine.mark_to_market(
+                    pnl_states[i],
+                    entry > 0.0 ? entry : 1.0);
+                std::cout << "preflight kind=position_seed sym=" << kSymbols[i]
+                          << " pos=" << pos
+                          << " entry=" << pnl_states[i].avg_price
+                          << '\n';
+            }
         }
     }
     std::array<std::atomic<bool>, 3> snapshot_pending {
