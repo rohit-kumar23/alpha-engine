@@ -121,3 +121,15 @@ After a Make build, the binary is at the repo root:
 | `--live` | Live futures endpoints (default is demo). |
 | `--clear` | Clear the terminal before each refresh. |
 | `--dump-dir PATH` | Append each raw WS frame as one line to `PATH/websocket_captures.jsonl`. |
+
+---
+
+## Strict Seed CI Profile
+
+Run analytics tests with strict startup seed mode enabled:
+
+```bash
+make run_test_analytics_strict
+```
+
+This validates strict-seed policy behavior (`HFT_PNL_SEED_REQUIRE_ALL_SYMBOLS=1`) against malformed and fixture-based `positionRisk` samples.

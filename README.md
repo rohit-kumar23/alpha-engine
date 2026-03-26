@@ -131,6 +131,7 @@ Implemented and usable:
 - execution command path (`New`/`Replace`/`Cancel`) + pre-trade risk checks
 - signed Binance REST gateway (`demo`/`live`) with retry and throttle-aware controls
 - user stream parsing and OMS lifecycle transitions
+- startup `positionRisk` seeding into risk/PnL state (with optional strict all-symbol validation)
 - optional reconcile and bounded healing paths
 - asynchronous execution audit and MD health logging
 

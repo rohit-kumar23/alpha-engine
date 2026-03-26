@@ -1,9 +1,8 @@
 #include "hft/analytics/position_seed.hpp"
 
 #include <array>
+#include <charconv>
 #include <cmath>
-#include <cstdlib>
-#include <string>
 
 namespace hft::analytics {
 
@@ -26,39 +25,70 @@ marketdata::Instrument parse_symbol(std::string_view symbol) {
     return marketdata::Instrument::Unknown;
 }
 
+bool key_matches_at(std::string_view s, std::size_t qpos, std::string_view key) {
+    if (qpos + 2 + key.size() >= s.size()) {
+        return false;
+    }
+    if (s[qpos] != '"' || s[qpos + 1 + key.size()] != '"') {
+        return false;
+    }
+    return s.substr(qpos + 1, key.size()) == key;
+}
+
 std::string_view extract_quoted_field(std::string_view block, std::string_view key) {
-    const std::string needle = "\"" + std::string(key) + "\":\"";
-    const std::size_t pos = block.find(needle);
-    if (pos == std::string_view::npos) {
-        return {};
+    for (std::size_t i = 0; i < block.size(); ++i) {
+        if (block[i] != '"') {
+            continue;
+        }
+        if (!key_matches_at(block, i, key)) {
+            continue;
+        }
+        std::size_t p = i + key.size() + 2;
+        while (p < block.size() && (block[p] == ' ' || block[p] == '\t')) {
+            ++p;
+        }
+        if (p >= block.size() || block[p] != ':') {
+            continue;
+        }
+        ++p;
+        while (p < block.size() && (block[p] == ' ' || block[p] == '\t')) {
+            ++p;
+        }
+        if (p >= block.size() || block[p] != '"') {
+            continue;
+        }
+        ++p;
+        const std::size_t start = p;
+        const std::size_t end = block.find('"', start);
+        if (end == std::string_view::npos || end <= start) {
+            return {};
+        }
+        return block.substr(start, end - start);
     }
-    const std::size_t value_start = pos + needle.size();
-    const std::size_t value_end = block.find('"', value_start);
-    if (value_end == std::string_view::npos || value_end <= value_start) {
-        return {};
-    }
-    return block.substr(value_start, value_end - value_start);
+    return {};
 }
 
 bool parse_double_sv(std::string_view v, double& out) {
     if (v.empty()) {
         return false;
     }
-    const std::string tmp(v);
-    char* parse_end = nullptr;
-    const double parsed = std::strtod(tmp.c_str(), &parse_end);
-    if (parse_end == tmp.c_str() || *parse_end != '\0') {
-        return false;
-    }
-    out = parsed;
-    return true;
+    const auto* b = v.data();
+    const auto* e = v.data() + v.size();
+    const auto [ptr, ec] = std::from_chars(b, e, out);
+    return ec == std::errc() && ptr == e;
 }
 
 } // namespace
 
-std::size_t parse_position_risk_seeds(std::string_view body, std::array<PositionSeed, 3>& seeds) {
+std::size_t parse_position_risk_seeds(
+    std::string_view body,
+    std::array<PositionSeed, 3>& seeds,
+    std::size_t* invalid_records) {
     for (auto& seed : seeds) {
         seed = PositionSeed{};
+    }
+    if (invalid_records != nullptr) {
+        *invalid_records = 0;
     }
 
     std::size_t parsed = 0;
@@ -94,6 +124,9 @@ std::size_t parse_position_risk_seeds(std::string_view body, std::array<Position
         double position = 0.0;
         double entry = 0.0;
         if (!parse_double_sv(pos_sv, position) || !parse_double_sv(entry_sv, entry)) {
+            if (invalid_records != nullptr) {
+                ++(*invalid_records);
+            }
             continue;
         }
         auto& seed = seeds[instrument_idx(instrument)];
@@ -120,6 +153,17 @@ void apply_position_seeds(
         pnl_states[i].inventory = seeds[i].position;
         pnl_states[i].avg_price = (std::abs(seeds[i].position) > 1e-12) ? seeds[i].entry_price : 0.0;
     }
+}
+
+bool strict_seed_ok(
+    bool require_all_symbols,
+    std::size_t parsed_symbols,
+    std::size_t invalid_records,
+    std::size_t expected_symbols) {
+    if (!require_all_symbols) {
+        return true;
+    }
+    return invalid_records == 0 && parsed_symbols >= expected_symbols;
 }
 
 } // namespace hft::analytics

@@ -83,7 +83,7 @@ TEST_ANALYTICS_OBJS := $(TEST_ANALYTICS_SRCS:.cpp=.o)
 
 .PHONY: all run clean \
 	run_test_marketdata run_test_orderbook \
-	run_test_strategy run_test_ordermgmt run_test_analytics
+	run_test_strategy run_test_ordermgmt run_test_analytics run_test_analytics_strict
 
 all: $(PRODUCTION_TARGET)
 
@@ -121,6 +121,9 @@ run_test_ordermgmt: $(TEST_ORDERMGMT_TARGET)
 
 run_test_analytics: $(TEST_ANALYTICS_TARGET)
 	./$(TEST_ANALYTICS_TARGET)
+
+run_test_analytics_strict: $(TEST_ANALYTICS_TARGET)
+	HFT_PNL_SEED_REQUIRE_ALL_SYMBOLS=1 ./$(TEST_ANALYTICS_TARGET)
 
 %.o: %.cpp
 	$(CXX) $(CXXFLAGS) -c $< -o $@

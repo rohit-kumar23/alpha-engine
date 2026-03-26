@@ -639,6 +639,8 @@ int main() {
         read_env_int_or_default("HFT_PNL_TAKER_FEE_BPS_X1000", read_env_int_or_default("HFT_PNL_FEE_BPS_X1000", 200))) / 1000.0;
     const double pnl_maker_fee_bps = static_cast<double>(
         read_env_int_or_default("HFT_PNL_MAKER_FEE_BPS_X1000", read_env_int_or_default("HFT_PNL_FEE_BPS_X1000", 200))) / 1000.0;
+    const bool pnl_seed_require_all_symbols =
+        read_env_int_or_default("HFT_PNL_SEED_REQUIRE_ALL_SYMBOLS", 1) == 1;
     const bool pnl_drawdown_guard = [] {
         const char* v = std::getenv("HFT_PNL_DRAWDOWN_GUARD");
         return v != nullptr && v[0] == '1';
@@ -782,6 +784,7 @@ int main() {
               << " pnl_fee_bps=" << pnl_fee_bps
               << " pnl_taker_fee_bps=" << pnl_taker_fee_bps
               << " pnl_maker_fee_bps=" << pnl_maker_fee_bps
+              << " pnl_seed_require_all=" << (pnl_seed_require_all_symbols ? 1 : 0)
               << " pnl_dd_guard=" << (pnl_drawdown_guard ? 1 : 0)
               << " pnl_dd_usdt=" << pnl_max_dd_usdt_default
               << " pnl_dd_btc=" << pnl_max_dd_usdt_btc
@@ -956,9 +959,37 @@ int main() {
         static_cast<std::uint64_t>(pnl_cooldown_sec_eth > 0 ? pnl_cooldown_sec_eth : 0) * 1000000000ULL,
         static_cast<std::uint64_t>(pnl_cooldown_sec_sol > 0 ? pnl_cooldown_sec_sol : 0) * 1000000000ULL,
     };
+    std::size_t position_seed_parsed_count = 0;
+    std::size_t position_seed_missing_count = 3;
+    std::size_t position_seed_invalid_count = 0;
     if (preflight_position_risk.ok) {
         std::array<hft::analytics::PositionSeed, 3> seeds {};
-        const std::size_t seeded = hft::analytics::parse_position_risk_seeds(preflight_position_risk.body, seeds);
+        std::size_t invalid_seed_records = 0;
+        const std::size_t seeded = hft::analytics::parse_position_risk_seeds(
+            preflight_position_risk.body,
+            seeds,
+            &invalid_seed_records);
+        const std::size_t missing = seeded < seeds.size() ? (seeds.size() - seeded) : 0;
+        position_seed_parsed_count = seeded;
+        position_seed_missing_count = missing;
+        position_seed_invalid_count = invalid_seed_records;
+        std::cout << "preflight kind=position_seed_summary parsed=" << seeded
+                  << " missing=" << missing
+                  << " invalid=" << invalid_seed_records
+                  << " require_all=" << (pnl_seed_require_all_symbols ? 1 : 0)
+                  << '\n';
+        if (!hft::analytics::strict_seed_ok(
+                pnl_seed_require_all_symbols,
+                seeded,
+                invalid_seed_records,
+                seeds.size())) {
+            std::cerr << "fatal: position seed strict mode requires all symbols valid"
+                      << " parsed=" << seeded
+                      << " missing=" << missing
+                      << " invalid=" << invalid_seed_records
+                      << '\n';
+            std::exit(1);
+        }
         hft::analytics::apply_position_seeds(seeds, risk, pnl_states);
         if (seeded > 0) {
             constexpr std::array<const char*, 3> kSymbols {"BTCUSDT", "ETHUSDT", "SOLUSDT"};
@@ -2275,6 +2306,9 @@ int main() {
                       << " tradable_btc=" << (tradable_btc ? 1 : 0)
                       << " tradable_eth=" << (tradable_eth ? 1 : 0)
                       << " tradable_sol=" << (tradable_sol ? 1 : 0)
+                      << " seed_parsed_count=" << position_seed_parsed_count
+                      << " seed_missing_count=" << position_seed_missing_count
+                      << " seed_invalid_count=" << position_seed_invalid_count
                       << " canary_rot_btc=" << canary_rot_window_btc
                       << " canary_rot_eth=" << canary_rot_window_eth
                       << " canary_rot_sol=" << canary_rot_window_sol

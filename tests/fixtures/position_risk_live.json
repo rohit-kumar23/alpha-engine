@@ -1,0 +1,23 @@
+[
+  {
+    "symbol": "SOLUSDT",
+    "positionAmt": "15.00",
+    "entryPrice": "138.75",
+    "markPrice": "139.10",
+    "isolated": "false"
+  },
+  {
+    "symbol": "BTCUSDT",
+    "positionAmt": "-0.020",
+    "entryPrice": "70250.00",
+    "markPrice": "70180.00",
+    "isolated": "false"
+  },
+  {
+    "symbol": "ETHUSDT",
+    "positionAmt": "0.000",
+    "entryPrice": "0",
+    "markPrice": "3550.40",
+    "isolated": "false"
+  }
+]

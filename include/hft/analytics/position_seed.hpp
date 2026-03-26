@@ -17,10 +17,18 @@ struct PositionSeed {
     bool present {false};
 };
 
-std::size_t parse_position_risk_seeds(std::string_view body, std::array<PositionSeed, 3>& seeds);
+std::size_t parse_position_risk_seeds(
+    std::string_view body,
+    std::array<PositionSeed, 3>& seeds,
+    std::size_t* invalid_records = nullptr);
 void apply_position_seeds(
     const std::array<PositionSeed, 3>& seeds,
     riskmgmt::PreTradeRisk& risk,
     std::array<PnLState, 3>& pnl_states);
+bool strict_seed_ok(
+    bool require_all_symbols,
+    std::size_t parsed_symbols,
+    std::size_t invalid_records,
+    std::size_t expected_symbols = 3);
 
 } // namespace hft::analytics

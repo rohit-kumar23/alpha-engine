@@ -352,6 +352,14 @@ Many values are stored as integers to avoid floating point work in hot paths.
   - **Meaning:** Fee assumption for mark-to-market telemetry.
   - **Use case:** More realistic PnL and drawdown calculations.
 
+- `HFT_PNL_TAKER_FEE_BPS_X1000`, `HFT_PNL_MAKER_FEE_BPS_X1000`
+  - **Meaning:** Separate taker/maker fee assumptions for PnL accounting.
+  - **Use case:** More accurate realized + MTM with mixed passive/aggressive fills.
+
+- `HFT_PNL_SEED_REQUIRE_ALL_SYMBOLS`
+  - **Meaning:** Require valid startup `positionRisk` seed for all configured symbols when set to `1`.
+  - **Use case:** Fail fast if exchange position snapshot is incomplete or malformed before trading begins.
+
 - `HFT_PNL_DRAWDOWN_GUARD`
   - **Meaning:** Enable drawdown-based symbol pause.
   - **Use case:** Stop trading strategy temporarily after local equity shock.
