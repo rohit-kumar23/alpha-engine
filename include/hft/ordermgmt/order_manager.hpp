@@ -34,7 +34,7 @@ public:
         std::uint32_t cancel_stale_ms = 0,
         std::array<std::uint32_t, 3> cancel_stale_ms_by_symbol = {0, 0, 0},
         std::array<std::uint32_t, 3> adverse_cancel_bps_x1000_by_symbol = {0, 0, 0});
-    std::optional<OrderCommand> on_intent(marketdata::Instrument instrument, const OrderIntent& intent, std::uint64_t ts_ns);
+    std::optional<OrderCommand> on_quote(marketdata::Instrument instrument, const QuoteIntent& quote, std::uint64_t ts_ns);
     void on_command_rejected(const OrderCommand& cmd);
     void on_exec_report(const execution::ExecReport& report);
     std::size_t active_orders() const;

@@ -44,9 +44,13 @@ add_executable(test_marketdata_orderbook
     tests/marketdata/test_binance_parser.cpp
     tests/marketdata/test_ws_smoke.cpp
     tests/orderbook/test_l2_book.cpp
+    tests/strategy/test_market_maker.cpp
+    tests/ordermgmt/test_order_manager.cpp
     src/marketdata/binance_parser.cpp
     src/marketdata/binance_ws_client.cpp
     src/orderbook/l2_book.cpp
+    src/strategy/market_maker.cpp
+    src/ordermgmt/order_manager.cpp
 )
 
 target_include_directories(test_marketdata_orderbook PRIVATE include ${CMAKE_SOURCE_DIR})

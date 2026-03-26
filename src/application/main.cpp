@@ -601,6 +601,35 @@ int main() {
         read_env_int_or_default("HFT_STRAT_QTY_INV_SHRINK_ETH_PPM", read_env_int_or_default("HFT_STRAT_QTY_INV_SHRINK_PPM", 700000))) / 1.0e6;
     const double strat_qty_shrink_sol = static_cast<double>(
         read_env_int_or_default("HFT_STRAT_QTY_INV_SHRINK_SOL_PPM", read_env_int_or_default("HFT_STRAT_QTY_INV_SHRINK_PPM", 700000))) / 1.0e6;
+    const double strat_k_bps_default = static_cast<double>(read_env_int_or_default("HFT_STRAT_K_BPS_X1000", 1500)) / 1.0e3;
+    const double strat_max_alpha_bps_default = static_cast<double>(read_env_int_or_default("HFT_STRAT_MAX_ALPHA_BPS_X1000", 3000)) / 1.0e3;
+    const double strat_gamma_bps_default = static_cast<double>(read_env_int_or_default("HFT_STRAT_GAMMA_BPS_X1000", 3000)) / 1.0e3;
+    const double strat_c1_default = static_cast<double>(read_env_int_or_default("HFT_STRAT_C1_X1000", 1500)) / 1.0e3;
+    const double strat_c2_bps_default = static_cast<double>(read_env_int_or_default("HFT_STRAT_C2_BPS_X1000", 3000)) / 1.0e3;
+    const double strat_min_delta_bps_default = static_cast<double>(read_env_int_or_default("HFT_STRAT_MIN_DELTA_BPS_X1000", 3000)) / 1.0e3;
+    const double strat_max_delta_bps_default = static_cast<double>(read_env_int_or_default("HFT_STRAT_MAX_DELTA_BPS_X1000", 10000)) / 1.0e3;
+    const double strat_sigma_threshold_bps_default = static_cast<double>(read_env_int_or_default("HFT_STRAT_SIGMA_THRESHOLD_BPS_X1000", 10000)) / 1.0e3;
+    const double strat_fee_bps_default = static_cast<double>(read_env_int_or_default("HFT_STRAT_FEE_BPS_X1000", 2000)) / 1.0e3;
+    const double strat_min_profit_buffer_bps_default = static_cast<double>(read_env_int_or_default("HFT_STRAT_MIN_PROFIT_BUFFER_BPS_X1000", 500)) / 1.0e3;
+    const double strat_tick_size_default = static_cast<double>(read_env_int_or_default("HFT_STRAT_TICK_SIZE_X1000000", 10000)) / 1.0e6;
+    const double strat_base_size_default = static_cast<double>(read_env_int_or_default("HFT_STRAT_BASE_SIZE_X1000", 10)) / 1.0e3;
+    const int strat_imbalance_stability_ms_default = read_env_int_or_default("HFT_STRAT_IMBALANCE_STABILITY_MS", 100);
+    const int strat_update_interval_ms_default = read_env_int_or_default("HFT_STRAT_UPDATE_INTERVAL_MS", 100);
+    const std::array<double, 3> strat_k_bps_by_symbol {
+        static_cast<double>(read_env_int_or_default("HFT_STRAT_K_BTC_BPS_X1000", static_cast<int>(strat_k_bps_default * 1000.0))) / 1.0e3,
+        static_cast<double>(read_env_int_or_default("HFT_STRAT_K_ETH_BPS_X1000", static_cast<int>(strat_k_bps_default * 1000.0))) / 1.0e3,
+        static_cast<double>(read_env_int_or_default("HFT_STRAT_K_SOL_BPS_X1000", static_cast<int>(strat_k_bps_default * 1000.0))) / 1.0e3,
+    };
+    const std::array<double, 3> strat_max_alpha_bps_by_symbol {
+        static_cast<double>(read_env_int_or_default("HFT_STRAT_MAX_ALPHA_BTC_BPS_X1000", static_cast<int>(strat_max_alpha_bps_default * 1000.0))) / 1.0e3,
+        static_cast<double>(read_env_int_or_default("HFT_STRAT_MAX_ALPHA_ETH_BPS_X1000", static_cast<int>(strat_max_alpha_bps_default * 1000.0))) / 1.0e3,
+        static_cast<double>(read_env_int_or_default("HFT_STRAT_MAX_ALPHA_SOL_BPS_X1000", static_cast<int>(strat_max_alpha_bps_default * 1000.0))) / 1.0e3,
+    };
+    const std::array<double, 3> strat_gamma_bps_by_symbol {
+        static_cast<double>(read_env_int_or_default("HFT_STRAT_GAMMA_BTC_BPS_X1000", static_cast<int>(strat_gamma_bps_default * 1000.0))) / 1.0e3,
+        static_cast<double>(read_env_int_or_default("HFT_STRAT_GAMMA_ETH_BPS_X1000", static_cast<int>(strat_gamma_bps_default * 1000.0))) / 1.0e3,
+        static_cast<double>(read_env_int_or_default("HFT_STRAT_GAMMA_SOL_BPS_X1000", static_cast<int>(strat_gamma_bps_default * 1000.0))) / 1.0e3,
+    };
     const double risk_max_order_qty = static_cast<double>(read_env_int_or_default("HFT_RISK_MAX_ORDER_QTY_X1000", 2000)) / 1000.0;
     const double risk_max_notional = static_cast<double>(read_env_int_or_default("HFT_RISK_MAX_NOTIONAL", 100000));
     const double risk_max_abs_pos = static_cast<double>(read_env_int_or_default("HFT_RISK_MAX_ABS_POS_X1000", 10000)) / 1000.0;
@@ -820,14 +849,26 @@ int main() {
     BinanceParser parser;
     const std::array<StrategyEngine, 3> strategy_engines {
         StrategyEngine(StrategyParams{
-            strat_alpha_btc, strat_spread_btc, strat_inv_lim_btc,
-            strat_edge_bps_btc, strat_qty_min_btc, strat_qty_max_btc, strat_qty_shrink_btc}),
+            strat_k_bps_by_symbol[0], strat_max_alpha_bps_by_symbol[0], strat_gamma_bps_by_symbol[0],
+            strat_c1_default, strat_c2_bps_default, strat_min_delta_bps_default, strat_max_delta_bps_default,
+            strat_sigma_threshold_bps_default, strat_fee_bps_default, strat_min_profit_buffer_bps_default,
+            strat_tick_size_default, strat_inv_lim_btc, strat_base_size_default, strat_qty_min_btc,
+            static_cast<std::uint32_t>(strat_imbalance_stability_ms_default > 0 ? strat_imbalance_stability_ms_default : 100),
+            static_cast<std::uint32_t>(strat_update_interval_ms_default > 0 ? strat_update_interval_ms_default : 100)}),
         StrategyEngine(StrategyParams{
-            strat_alpha_eth, strat_spread_eth, strat_inv_lim_eth,
-            strat_edge_bps_eth, strat_qty_min_eth, strat_qty_max_eth, strat_qty_shrink_eth}),
+            strat_k_bps_by_symbol[1], strat_max_alpha_bps_by_symbol[1], strat_gamma_bps_by_symbol[1],
+            strat_c1_default, strat_c2_bps_default, strat_min_delta_bps_default, strat_max_delta_bps_default,
+            strat_sigma_threshold_bps_default, strat_fee_bps_default, strat_min_profit_buffer_bps_default,
+            strat_tick_size_default, strat_inv_lim_eth, strat_base_size_default, strat_qty_min_eth,
+            static_cast<std::uint32_t>(strat_imbalance_stability_ms_default > 0 ? strat_imbalance_stability_ms_default : 100),
+            static_cast<std::uint32_t>(strat_update_interval_ms_default > 0 ? strat_update_interval_ms_default : 100)}),
         StrategyEngine(StrategyParams{
-            strat_alpha_sol, strat_spread_sol, strat_inv_lim_sol,
-            strat_edge_bps_sol, strat_qty_min_sol, strat_qty_max_sol, strat_qty_shrink_sol}),
+            strat_k_bps_by_symbol[2], strat_max_alpha_bps_by_symbol[2], strat_gamma_bps_by_symbol[2],
+            strat_c1_default, strat_c2_bps_default, strat_min_delta_bps_default, strat_max_delta_bps_default,
+            strat_sigma_threshold_bps_default, strat_fee_bps_default, strat_min_profit_buffer_bps_default,
+            strat_tick_size_default, strat_inv_lim_sol, strat_base_size_default, strat_qty_min_sol,
+            static_cast<std::uint32_t>(strat_imbalance_stability_ms_default > 0 ? strat_imbalance_stability_ms_default : 100),
+            static_cast<std::uint32_t>(strat_update_interval_ms_default > 0 ? strat_update_interval_ms_default : 100)}),
     };
     OrderManager order_manager(
         static_cast<std::uint32_t>(exec_replace_bps_x1000 > 0 ? exec_replace_bps_x1000 : 20),
@@ -1541,7 +1582,7 @@ int main() {
                     }
 
                     strategy_states[idx].inventory = risk.position(event.instrument);
-                    const auto intent = strategy_engines[idx].on_book_update(snap, strategy_states[idx]);
+                    const auto quote = strategy_engines[idx].on_book_update(snap, strategy_states[idx]);
                     const std::uint64_t strategy_ts = now_ns();
                     if (event.ts_enqueued_ns > 0 && strategy_ts > event.ts_enqueued_ns) {
                         const std::uint64_t q2s_ns = strategy_ts - event.ts_enqueued_ns;
@@ -1557,10 +1598,12 @@ int main() {
                             queue_to_strategy_ns_max = q2s_ns;
                         }
                     }
-                    if (intent.has_value()) {
+                    if (quote.bid.has_value() || quote.ask.has_value() || order_manager.active_orders() > 0) {
                         ++strategy_signals;
-                        ++intent_generated;
-                        const auto cmd = order_manager.on_intent(event.instrument, *intent, strategy_ts);
+                        if (quote.bid.has_value() || quote.ask.has_value()) {
+                            ++intent_generated;
+                        }
+                        const auto cmd = order_manager.on_quote(event.instrument, quote, strategy_ts);
                         if (cmd.has_value()) {
                             if (cmd->type == CommandType::New) {
                                 ++om_cmd_new;

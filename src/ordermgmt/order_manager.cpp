@@ -31,145 +31,144 @@ OrderManager::OrderManager(
       cancel_stale_ms_by_symbol_(cancel_stale_ms_by_symbol),
       adverse_cancel_bps_x1000_by_symbol_(adverse_cancel_bps_x1000_by_symbol) {}
 
-std::optional<OrderCommand> OrderManager::on_intent(marketdata::Instrument instrument, const OrderIntent& intent, std::uint64_t ts_ns) {
-    OrderSlot* existing_same_side = nullptr;
-    OrderSlot* existing_opposite_side = nullptr;
-    OrderSlot* free_slot = nullptr;
+std::optional<OrderCommand> OrderManager::on_quote(marketdata::Instrument instrument, const QuoteIntent& quote, std::uint64_t ts_ns) {
+    const std::size_t sym_idx = instrument_idx(instrument);
+    const std::uint32_t stale_ms =
+        cancel_stale_ms_by_symbol_[sym_idx] > 0 ? cancel_stale_ms_by_symbol_[sym_idx] : cancel_stale_ms_;
+    const std::uint32_t adverse_bps_x1000 = adverse_cancel_bps_x1000_by_symbol_[sym_idx];
 
-    for (auto& slot : slots_) {
-        if (!slot.live) {
-            if (free_slot == nullptr) {
-                free_slot = &slot;
+    auto eval_side = [&](Side side, const std::optional<OrderIntent>& intent_opt) -> std::optional<OrderCommand> {
+        OrderSlot* existing = nullptr;
+        OrderSlot* free_slot = nullptr;
+        for (auto& slot : slots_) {
+            if (!slot.live) {
+                if (free_slot == nullptr) {
+                    free_slot = &slot;
+                }
+                continue;
             }
-            continue;
+            if (slot.instrument == instrument && slot.side == side) {
+                existing = &slot;
+                break;
+            }
         }
-        if (slot.instrument != instrument) {
-            continue;
-        }
-        if (slot.side == intent.side) {
-            existing_same_side = &slot;
-        } else {
-            existing_opposite_side = &slot;
-        }
-    }
 
-    if (existing_opposite_side != nullptr && !existing_opposite_side->cancel_inflight) {
-        ++cancel_opposite_counts_[instrument_idx(instrument)];
-        existing_opposite_side->cancel_inflight = true;
-        existing_opposite_side->ts_last_update_ns = ts_ns;
-        return OrderCommand{
-            CommandType::Cancel,
-            instrument,
-            existing_opposite_side->client_order_id,
-            existing_opposite_side->side,
-            existing_opposite_side->price,
-            existing_opposite_side->qty,
-            ts_ns,
-        };
-    }
-
-    if (existing_same_side == nullptr) {
-        if (free_slot == nullptr) {
+        if (!intent_opt.has_value()) {
+            if (existing != nullptr && !existing->cancel_inflight) {
+                ++cancel_opposite_counts_[sym_idx];
+                existing->cancel_inflight = true;
+                existing->ts_last_update_ns = ts_ns;
+                return OrderCommand{
+                    CommandType::Cancel,
+                    instrument,
+                    existing->client_order_id,
+                    existing->side,
+                    existing->price,
+                    existing->qty,
+                    ts_ns,
+                };
+            }
             return std::nullopt;
         }
 
-        free_slot->live = true;
-        free_slot->cancel_inflight = false;
-        free_slot->client_order_id = next_client_order_id_.fetch_add(1, std::memory_order_relaxed);
-        free_slot->instrument = instrument;
-        free_slot->side = intent.side;
-        free_slot->price = intent.price;
-        free_slot->qty = intent.qty;
-        free_slot->ts_last_update_ns = ts_ns;
+        const OrderIntent& intent = *intent_opt;
+        if (existing == nullptr) {
+            if (free_slot == nullptr || intent.qty <= 0.0 || intent.price <= 0.0) {
+                return std::nullopt;
+            }
+            free_slot->live = true;
+            free_slot->cancel_inflight = false;
+            free_slot->client_order_id = next_client_order_id_.fetch_add(1, std::memory_order_relaxed);
+            free_slot->instrument = instrument;
+            free_slot->side = side;
+            free_slot->price = intent.price;
+            free_slot->qty = intent.qty;
+            free_slot->ts_last_update_ns = ts_ns;
+            return OrderCommand{
+                CommandType::New,
+                instrument,
+                free_slot->client_order_id,
+                side,
+                intent.price,
+                intent.qty,
+                ts_ns,
+            };
+        }
 
+        if (stale_ms > 0 && !existing->cancel_inflight) {
+            const std::uint64_t stale_ns = static_cast<std::uint64_t>(stale_ms) * 1000000ULL;
+            const bool stale = ts_ns > existing->ts_last_update_ns &&
+                (ts_ns - existing->ts_last_update_ns) >= stale_ns;
+            if (stale) {
+                ++cancel_stale_counts_[sym_idx];
+                existing->cancel_inflight = true;
+                existing->ts_last_update_ns = ts_ns;
+                return OrderCommand{
+                    CommandType::Cancel,
+                    instrument,
+                    existing->client_order_id,
+                    existing->side,
+                    existing->price,
+                    existing->qty,
+                    ts_ns,
+                };
+            }
+        }
+
+        if (adverse_bps_x1000 > 0 && !existing->cancel_inflight) {
+            const double base_px = existing->price > 0.0 ? existing->price : intent.price;
+            if (base_px > 0.0) {
+                const double adverse_move = side == Side::Buy
+                    ? (existing->price - intent.price)
+                    : (intent.price - existing->price);
+                if (adverse_move > 0.0) {
+                    const double adverse_bps_calc_x1000 = (adverse_move / base_px) * 1.0e7;
+                    if (adverse_bps_calc_x1000 >= static_cast<double>(adverse_bps_x1000)) {
+                        ++cancel_adverse_counts_[sym_idx];
+                        existing->cancel_inflight = true;
+                        existing->ts_last_update_ns = ts_ns;
+                        return OrderCommand{
+                            CommandType::Cancel,
+                            instrument,
+                            existing->client_order_id,
+                            existing->side,
+                            existing->price,
+                            existing->qty,
+                            ts_ns,
+                        };
+                    }
+                }
+            }
+        }
+
+        const double base_px = existing->price > 0.0 ? existing->price : intent.price;
+        const double px_diff = std::abs(intent.price - existing->price);
+        const double px_bps_x1000 = base_px > 0.0 ? (px_diff / base_px) * 1.0e7 : 0.0;
+        const bool qty_changed = std::abs(intent.qty - existing->qty) > 1e-12;
+        const bool should_replace =
+            qty_changed || px_bps_x1000 >= static_cast<double>(replace_threshold_bps_x1000_);
+        if (!should_replace || existing->cancel_inflight) {
+            return std::nullopt;
+        }
+
+        existing->price = intent.price;
+        existing->qty = intent.qty;
+        existing->ts_last_update_ns = ts_ns;
         return OrderCommand{
-            CommandType::New,
+            CommandType::Replace,
             instrument,
-            free_slot->client_order_id,
-            intent.side,
+            existing->client_order_id,
+            side,
             intent.price,
             intent.qty,
             ts_ns,
         };
-    }
-
-    const std::size_t sym_idx = instrument_idx(instrument);
-    const std::uint32_t stale_ms =
-        cancel_stale_ms_by_symbol_[sym_idx] > 0 ? cancel_stale_ms_by_symbol_[sym_idx] : cancel_stale_ms_;
-    if (stale_ms > 0 && !existing_same_side->cancel_inflight) {
-        const std::uint64_t stale_ns = static_cast<std::uint64_t>(stale_ms) * 1000000ULL;
-        const bool stale = ts_ns > existing_same_side->ts_last_update_ns &&
-            (ts_ns - existing_same_side->ts_last_update_ns) >= stale_ns;
-        if (stale) {
-            ++cancel_stale_counts_[sym_idx];
-            existing_same_side->cancel_inflight = true;
-            existing_same_side->ts_last_update_ns = ts_ns;
-            return OrderCommand{
-                CommandType::Cancel,
-                instrument,
-                existing_same_side->client_order_id,
-                existing_same_side->side,
-                existing_same_side->price,
-                existing_same_side->qty,
-                ts_ns,
-            };
-        }
-    }
-
-    const std::uint32_t adverse_bps_x1000 = adverse_cancel_bps_x1000_by_symbol_[sym_idx];
-    if (adverse_bps_x1000 > 0 && !existing_same_side->cancel_inflight) {
-        const double base_px = existing_same_side->price > 0.0 ? existing_same_side->price : intent.price;
-        if (base_px > 0.0) {
-            double adverse_move = 0.0;
-            if (existing_same_side->side == Side::Buy) {
-                adverse_move = existing_same_side->price - intent.price;
-            } else {
-                adverse_move = intent.price - existing_same_side->price;
-            }
-            if (adverse_move > 0.0) {
-                const double adverse_bps_calc_x1000 = (adverse_move / base_px) * 1.0e7;
-                if (adverse_bps_calc_x1000 >= static_cast<double>(adverse_bps_x1000)) {
-                    ++cancel_adverse_counts_[sym_idx];
-                    existing_same_side->cancel_inflight = true;
-                    existing_same_side->ts_last_update_ns = ts_ns;
-                    return OrderCommand{
-                        CommandType::Cancel,
-                        instrument,
-                        existing_same_side->client_order_id,
-                        existing_same_side->side,
-                        existing_same_side->price,
-                        existing_same_side->qty,
-                        ts_ns,
-                    };
-                }
-            }
-        }
-    }
-
-    const double base_px = existing_same_side->price > 0.0 ? existing_same_side->price : intent.price;
-    const double px_diff = std::abs(intent.price - existing_same_side->price);
-    const double px_bps_x1000 = base_px > 0.0 ? (px_diff / base_px) * 1.0e7 : 0.0;
-    const bool qty_changed = std::abs(intent.qty - existing_same_side->qty) > 1e-12;
-    const bool should_replace =
-        qty_changed || px_bps_x1000 >= static_cast<double>(replace_threshold_bps_x1000_);
-
-    if (!should_replace || existing_same_side->cancel_inflight) {
-        return std::nullopt;
-    }
-
-    existing_same_side->price = intent.price;
-    existing_same_side->qty = intent.qty;
-    existing_same_side->ts_last_update_ns = ts_ns;
-
-    return OrderCommand{
-        CommandType::Replace,
-        instrument,
-        existing_same_side->client_order_id,
-        intent.side,
-        intent.price,
-        intent.qty,
-        ts_ns,
     };
+
+    if (const auto cmd = eval_side(Side::Buy, quote.bid); cmd.has_value()) {
+        return cmd;
+    }
+    return eval_side(Side::Sell, quote.ask);
 }
 
 void OrderManager::on_command_rejected(const OrderCommand& cmd) {

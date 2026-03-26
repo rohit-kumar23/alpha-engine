@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -40,6 +41,11 @@ struct OrderIntent {
     Side side {Side::Buy};
     double price {};
     double qty {};
+};
+
+struct QuoteIntent {
+    std::optional<OrderIntent> bid;
+    std::optional<OrderIntent> ask;
 };
 
 struct Fill {
