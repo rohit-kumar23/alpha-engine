@@ -13,7 +13,7 @@ namespace tests::marketdata {
 
 int run_ws_smoke_test(tests::TestLog& log, bool enable) {
     if (!enable) {
-        log.info("WS smoke skipped (pass --ws-smoke on test_marketdata_orderbook to run live connectivity check)");
+        log.info("WS smoke skipped (pass --ws-smoke on test_marketdata to run live connectivity check)");
         return 0;
     }
 

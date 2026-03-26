@@ -35,6 +35,10 @@ void PreTradeRisk::on_fill(marketdata::Instrument instrument, double signed_qty)
     positions_[idx(instrument)] += signed_qty;
 }
 
+void PreTradeRisk::set_position(marketdata::Instrument instrument, double position) {
+    positions_[idx(instrument)] = position;
+}
+
 double PreTradeRisk::position(marketdata::Instrument instrument) const {
     return positions_[idx(instrument)];
 }

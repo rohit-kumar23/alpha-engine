@@ -39,31 +39,24 @@ using hft::marketdata::instrument_to_symbol;
 using hft::BookSnapshot;
 using hft::orderbook::L2Book;
 
-// Hardcoded defaults (Binance USD-M combined stream matches engine kStreams).
 constexpr int kPrintLevelsPerSide = 10;
 constexpr int kRefreshIntervalMs = 500;
 
 std::atomic<bool> g_stop{false};
 
-void on_sigint(int) {
-    g_stop.store(true, std::memory_order_relaxed);
-}
+void on_sigint(int) { g_stop.store(true, std::memory_order_relaxed); }
 
 std::size_t instrument_index(Instrument i) {
     switch (i) {
-        case Instrument::BtcUsdt:
-            return 0;
-        case Instrument::EthUsdt:
-            return 1;
-        case Instrument::SolUsdt:
-            return 2;
-        default:
-            return 3;
+        case Instrument::BtcUsdt: return 0;
+        case Instrument::EthUsdt: return 1;
+        case Instrument::SolUsdt: return 2;
+        default: return 3;
     }
 }
 
 void print_usage() {
-    std::cerr << R"(test_orderbook_live_compare — REST depth seed + combined WS -> parser -> L2Book (BTC/ETH/SOL).
+    std::cerr << R"(test_orderbook — REST depth seed + combined WS -> parser -> L2Book (BTC/ETH/SOL).
 
 Defaults are built in: demo endpoints, )"
               << kPrintLevelsPerSide << R"( rows per side, refresh every )" << kRefreshIntervalMs
@@ -92,12 +85,7 @@ void append_dump_line(const std::filesystem::path& dir, std::mutex& dump_mu, con
     }
 }
 
-void print_book_block(
-    std::ostream& out,
-    std::string_view symbol,
-    const L2Book& book,
-    std::size_t max_levels,
-    const BookSnapshot& top) {
+void print_book_block(std::ostream& out, std::string_view symbol, const L2Book& book, std::size_t max_levels, const BookSnapshot& top) {
     using View = L2Book::BookLevelView;
     std::array<View, 32> bids{};
     std::array<View, 32> asks{};
@@ -242,7 +230,7 @@ int main(int argc, char** argv) {
         }
         {
             std::lock_guard lock(book_mu);
-            frame << "[TEST_ORDERBOOK_LIVE_COMPARE] ws_text_frames=" << ws_frames.load(std::memory_order_relaxed)
+            frame << "[TEST_ORDERBOOK] ws_text_frames=" << ws_frames.load(std::memory_order_relaxed)
                   << "  Ctrl+C to exit\n\n";
             for (std::size_t i = 0; i < 3; ++i) {
                 if (!inst_on[i]) {

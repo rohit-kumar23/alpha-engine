@@ -23,6 +23,7 @@ struct ExecReport {
     Side side {Side::Buy};
     double last_fill_qty {};
     double last_fill_price {};
+    bool is_maker {false};
     bool terminal {false};
 };
 

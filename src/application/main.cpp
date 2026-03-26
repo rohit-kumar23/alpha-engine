@@ -111,6 +111,34 @@ std::size_t extract_json_client_order_ids(
     return n;
 }
 
+double extract_position_field_for_symbol(std::string_view body, std::string_view symbol, std::string_view key) {
+    const std::string needle = std::string("\"symbol\":\"") + std::string(symbol) + "\"";
+    std::size_t pos = body.find(needle);
+    if (pos == std::string_view::npos) {
+        return 0.0;
+    }
+    const std::size_t end = body.find("\"symbol\":", pos + needle.size());
+    const std::string_view block =
+        end == std::string_view::npos ? body.substr(pos) : body.substr(pos, end - pos);
+    const std::string key_needle = std::string("\"") + std::string(key) + "\":\"";
+    const std::size_t kpos = block.find(key_needle);
+    if (kpos == std::string_view::npos) {
+        return 0.0;
+    }
+    const std::size_t vstart = kpos + key_needle.size();
+    const std::size_t vend = block.find('"', vstart);
+    if (vend == std::string_view::npos) {
+        return 0.0;
+    }
+    const std::string val(block.substr(vstart, vend - vstart));
+    char* parse_end = nullptr;
+    const double out = std::strtod(val.c_str(), &parse_end);
+    if (parse_end == val.c_str() || *parse_end != '\0') {
+        return 0.0;
+    }
+    return out;
+}
+
 std::uint64_t now_ns() {
     return static_cast<std::uint64_t>(
         std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -634,6 +662,10 @@ int main() {
     const double risk_max_notional = static_cast<double>(read_env_int_or_default("HFT_RISK_MAX_NOTIONAL", 100000));
     const double risk_max_abs_pos = static_cast<double>(read_env_int_or_default("HFT_RISK_MAX_ABS_POS_X1000", 10000)) / 1000.0;
     const double pnl_fee_bps = static_cast<double>(read_env_int_or_default("HFT_PNL_FEE_BPS_X1000", 200)) / 1000.0;
+    const double pnl_taker_fee_bps = static_cast<double>(
+        read_env_int_or_default("HFT_PNL_TAKER_FEE_BPS_X1000", read_env_int_or_default("HFT_PNL_FEE_BPS_X1000", 200))) / 1000.0;
+    const double pnl_maker_fee_bps = static_cast<double>(
+        read_env_int_or_default("HFT_PNL_MAKER_FEE_BPS_X1000", read_env_int_or_default("HFT_PNL_FEE_BPS_X1000", 200))) / 1000.0;
     const bool pnl_drawdown_guard = [] {
         const char* v = std::getenv("HFT_PNL_DRAWDOWN_GUARD");
         return v != nullptr && v[0] == '1';
@@ -775,6 +807,8 @@ int main() {
               << " risk_max_notional=" << risk_max_notional
               << " risk_max_abs_pos=" << risk_max_abs_pos
               << " pnl_fee_bps=" << pnl_fee_bps
+              << " pnl_taker_fee_bps=" << pnl_taker_fee_bps
+              << " pnl_maker_fee_bps=" << pnl_maker_fee_bps
               << " pnl_dd_guard=" << (pnl_drawdown_guard ? 1 : 0)
               << " pnl_dd_usdt=" << pnl_max_dd_usdt_default
               << " pnl_dd_btc=" << pnl_max_dd_usdt_btc
@@ -889,7 +923,7 @@ int main() {
         risk_max_abs_pos,
         &g_kill_switch,
     });
-    hft::PnLEngine pnl_engine(pnl_fee_bps);
+    hft::PnLEngine pnl_engine(pnl_taker_fee_bps, pnl_maker_fee_bps);
     hft::ordermgmt::OmsState oms;
     BinanceGateway gateway(GatewayConfig{
         binance_ep.rest_host,
@@ -901,6 +935,7 @@ int main() {
         &g_rest_weight_1m,
     });
     const auto preflight_open_orders = gateway.signed_open_orders();
+    const auto preflight_position_risk = gateway.signed_position_risk();
     const std::array<double, 3> exch_min_notional_by_symbol {
         gateway.symbol_constraints(Instrument::BtcUsdt).min_notional > 0.0
             ? gateway.symbol_constraints(Instrument::BtcUsdt).min_notional
@@ -922,6 +957,10 @@ int main() {
               << " min_notional_eth=" << exch_min_notional_by_symbol[1]
               << " min_notional_sol=" << exch_min_notional_by_symbol[2]
               << '\n';
+    std::cout << "preflight kind=position_risk ok=" << (preflight_position_risk.ok ? 1 : 0)
+              << " http=" << preflight_position_risk.http_status
+              << " ix=" << preflight_position_risk.binance_error_code
+              << '\n';
 
     std::array<hft::orderbook::L2Book, 3> books;
     std::array<DepthEventBuffer<1024>, 3> pending_depth;
@@ -940,6 +979,25 @@ int main() {
         static_cast<std::uint64_t>(pnl_cooldown_sec_eth > 0 ? pnl_cooldown_sec_eth : 0) * 1000000000ULL,
         static_cast<std::uint64_t>(pnl_cooldown_sec_sol > 0 ? pnl_cooldown_sec_sol : 0) * 1000000000ULL,
     };
+    if (preflight_position_risk.ok) {
+        constexpr std::array<const char*, 3> kSymbols {"BTCUSDT", "ETHUSDT", "SOLUSDT"};
+        constexpr std::array<Instrument, 3> kInstruments {
+            Instrument::BtcUsdt,
+            Instrument::EthUsdt,
+            Instrument::SolUsdt,
+        };
+        for (std::size_t i = 0; i < kInstruments.size(); ++i) {
+            const double pos = extract_position_field_for_symbol(preflight_position_risk.body, kSymbols[i], "positionAmt");
+            const double entry = extract_position_field_for_symbol(preflight_position_risk.body, kSymbols[i], "entryPrice");
+            risk.set_position(kInstruments[i], pos);
+            pnl_states[i].inventory = pos;
+            pnl_states[i].avg_price = (std::abs(pos) > 1e-12) ? entry : 0.0;
+            std::cout << "preflight kind=position_seed sym=" << kSymbols[i]
+                      << " pos=" << pos
+                      << " entry=" << pnl_states[i].avg_price
+                      << '\n';
+        }
+    }
     std::array<std::atomic<bool>, 3> snapshot_pending {
         std::atomic<bool>{false},
         std::atomic<bool>{false},
@@ -1439,56 +1497,60 @@ int main() {
         const std::size_t exec_batch_max =
             static_cast<std::size_t>(exec_report_batch_max > 0 ? exec_report_batch_max : 512);
         ExecReportMsg exec_msg;
-        for (std::size_t exec_n = 0; exec_n < exec_batch_max && exec_report_queue.pop(exec_msg); ++exec_n) {
-            had_work = true;
+        auto process_exec_report = [&](const ExecReportMsg& msg) {
             ++exec_reports;
-            if (exec_msg.report.type == ExecEventType::Ack) {
+            if (msg.report.type == ExecEventType::Ack) {
                 ++exec_acks;
-            } else if (exec_msg.report.type == ExecEventType::Reject) {
+            } else if (msg.report.type == ExecEventType::Reject) {
                 ++exec_rejects;
-            } else if (exec_msg.report.type == ExecEventType::Canceled) {
+            } else if (msg.report.type == ExecEventType::Canceled) {
                 ++exec_cancels;
             }
-            oms.on_exec_report(exec_msg.report, exec_msg.ts_ns);
-            order_manager.on_exec_report(exec_msg.report);
-            if (exec_msg.report.client_order_id > 0) {
-                const std::size_t li = static_cast<std::size_t>(exec_msg.report.client_order_id % kLifecycleCap);
+            oms.on_exec_report(msg.report, msg.ts_ns);
+            order_manager.on_exec_report(msg.report);
+            if (msg.report.client_order_id > 0) {
+                const std::size_t li = static_cast<std::size_t>(msg.report.client_order_id % kLifecycleCap);
                 auto& e = lifecycle[li];
-                const bool terminal = exec_msg.report.type == ExecEventType::Reject ||
-                    exec_msg.report.type == ExecEventType::Canceled || exec_msg.report.terminal;
-                if (terminal && e.active && e.client_order_id == exec_msg.report.client_order_id) {
+                const bool terminal = msg.report.type == ExecEventType::Reject ||
+                    msg.report.type == ExecEventType::Canceled || msg.report.terminal;
+                if (terminal && e.active && e.client_order_id == msg.report.client_order_id) {
                     e.active = false;
                     e.timeout_reported = false;
                 }
             }
-            if (exec_msg.report.type == ExecEventType::Fill && exec_msg.report.last_fill_qty > 0.0) {
+            if (msg.report.type == ExecEventType::Fill && msg.report.last_fill_qty > 0.0) {
                 ++exec_fills;
-                const double signed_qty = exec_msg.report.side == Side::Buy
-                    ? exec_msg.report.last_fill_qty
-                    : -exec_msg.report.last_fill_qty;
-                risk.on_fill(exec_msg.report.instrument, signed_qty);
+                const double signed_qty = msg.report.side == Side::Buy
+                    ? msg.report.last_fill_qty
+                    : -msg.report.last_fill_qty;
+                risk.on_fill(msg.report.instrument, signed_qty);
                 hft::Fill fill {};
-                fill.side = exec_msg.report.side;
-                fill.price = exec_msg.report.last_fill_price;
-                fill.qty = exec_msg.report.last_fill_qty;
-                fill.ts_ns = exec_msg.ts_ns;
-                pnl_engine.on_fill(fill, pnl_states[instrument_index(exec_msg.report.instrument)]);
+                fill.side = msg.report.side;
+                fill.price = msg.report.last_fill_price;
+                fill.qty = msg.report.last_fill_qty;
+                fill.ts_ns = msg.ts_ns;
+                fill.is_maker = msg.report.is_maker;
+                pnl_engine.on_fill(fill, pnl_states[instrument_index(msg.report.instrument)]);
             }
-            const bool audit_drop_copy = exec_msg.report.type == ExecEventType::Fill ||
-                exec_msg.report.type == ExecEventType::Reject || exec_msg.report.type == ExecEventType::Canceled ||
-                exec_msg.report.terminal;
+            const bool audit_drop_copy = msg.report.type == ExecEventType::Fill ||
+                msg.report.type == ExecEventType::Reject || msg.report.type == ExecEventType::Canceled ||
+                msg.report.terminal;
             if (audit_drop_copy) {
                 exec_audit_line(
                     exec_audit_on,
                     exec_audit,
                     exec_audit_drops,
                     "ts_ns=%llu event=drop_copy kind=%u sym=%s coid=%llu term=%u",
-                    static_cast<unsigned long long>(exec_msg.ts_ns),
-                    static_cast<unsigned>(exec_msg.report.type),
-                    instrument_name(exec_msg.report.instrument),
-                    static_cast<unsigned long long>(exec_msg.report.client_order_id),
-                    exec_msg.report.terminal ? 1U : 0U);
+                    static_cast<unsigned long long>(msg.ts_ns),
+                    static_cast<unsigned>(msg.report.type),
+                    instrument_name(msg.report.instrument),
+                    static_cast<unsigned long long>(msg.report.client_order_id),
+                    msg.report.terminal ? 1U : 0U);
             }
+        };
+        for (std::size_t exec_n = 0; exec_n < exec_batch_max && exec_report_queue.pop(exec_msg); ++exec_n) {
+            had_work = true;
+            process_exec_report(exec_msg);
         }
 
         const std::size_t md_batch_max =
@@ -1856,54 +1918,7 @@ int main() {
         }
         for (std::size_t exec_n = 0; exec_n < exec_batch_max && exec_report_queue.pop(exec_msg); ++exec_n) {
             had_work = true;
-            ++exec_reports;
-            if (exec_msg.report.type == ExecEventType::Ack) {
-                ++exec_acks;
-            } else if (exec_msg.report.type == ExecEventType::Reject) {
-                ++exec_rejects;
-            } else if (exec_msg.report.type == ExecEventType::Canceled) {
-                ++exec_cancels;
-            }
-            oms.on_exec_report(exec_msg.report, exec_msg.ts_ns);
-            order_manager.on_exec_report(exec_msg.report);
-            if (exec_msg.report.client_order_id > 0) {
-                const std::size_t li = static_cast<std::size_t>(exec_msg.report.client_order_id % kLifecycleCap);
-                auto& e = lifecycle[li];
-                const bool terminal = exec_msg.report.type == ExecEventType::Reject ||
-                    exec_msg.report.type == ExecEventType::Canceled || exec_msg.report.terminal;
-                if (terminal && e.active && e.client_order_id == exec_msg.report.client_order_id) {
-                    e.active = false;
-                    e.timeout_reported = false;
-                }
-            }
-            if (exec_msg.report.type == ExecEventType::Fill && exec_msg.report.last_fill_qty > 0.0) {
-                ++exec_fills;
-                const double signed_qty = exec_msg.report.side == Side::Buy
-                    ? exec_msg.report.last_fill_qty
-                    : -exec_msg.report.last_fill_qty;
-                risk.on_fill(exec_msg.report.instrument, signed_qty);
-                hft::Fill fill {};
-                fill.side = exec_msg.report.side;
-                fill.price = exec_msg.report.last_fill_price;
-                fill.qty = exec_msg.report.last_fill_qty;
-                fill.ts_ns = exec_msg.ts_ns;
-                pnl_engine.on_fill(fill, pnl_states[instrument_index(exec_msg.report.instrument)]);
-            }
-            const bool audit_drop_copy = exec_msg.report.type == ExecEventType::Fill ||
-                exec_msg.report.type == ExecEventType::Reject || exec_msg.report.type == ExecEventType::Canceled ||
-                exec_msg.report.terminal;
-            if (audit_drop_copy) {
-                exec_audit_line(
-                    exec_audit_on,
-                    exec_audit,
-                    exec_audit_drops,
-                    "ts_ns=%llu event=drop_copy kind=%u sym=%s coid=%llu term=%u",
-                    static_cast<unsigned long long>(exec_msg.ts_ns),
-                    static_cast<unsigned>(exec_msg.report.type),
-                    instrument_name(exec_msg.report.instrument),
-                    static_cast<unsigned long long>(exec_msg.report.client_order_id),
-                    exec_msg.report.terminal ? 1U : 0U);
-            }
+            process_exec_report(exec_msg);
         }
 
         const auto now = std::chrono::steady_clock::now();

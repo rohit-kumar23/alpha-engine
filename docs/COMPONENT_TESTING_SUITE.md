@@ -6,16 +6,16 @@ This file lists the **tests that exist**, **how to run** them, and **how to veri
 
 | Binary | What it exercises |
 |--------|-------------------|
-| `test_marketdata_orderbook` | **Marketdata:** `BinanceParser` on fixtures; optional live WebSocket smoke (`--ws-smoke`). **Orderbook:** `L2Book` with parser-fed events (fixtures). |
-| `test_orderbook_live_compare` | **Marketdata + orderbook:** REST depth seed, then live combined futures WS into `L2Book`, printed for manual UI comparison (optional `--live`, `--dump-dir`, etc.). |
+| `test_marketdata` | **Marketdata:** `BinanceParser` on fixtures; optional live WebSocket smoke (`--ws-smoke`). **Orderbook:** `L2Book` with parser-fed events (fixtures). |
+| `test_orderbook` | **Marketdata + orderbook:** REST depth seed, then live combined futures WS into `L2Book`, printed for manual UI comparison (optional `--live`, `--dump-dir`, etc.). |
 
 **How to verify:** exit code `0` means all checks passed; non-zero means failure. Logs use `[PASS]` / `[FAIL]` / `[INFO]`; use `--verbose` where supported for extra detail.
 
 ---
 
-## `test_marketdata_orderbook`
+## `test_marketdata`
 
-Registered in CTest as **`marketdata_orderbook`**.
+Registered in CTest as **`marketdata`**.
 
 ### CMake / CTest
 
@@ -30,15 +30,15 @@ ctest --test-dir build --output-on-failure
 Only this test:
 
 ```bash
-ctest --test-dir build -R marketdata_orderbook --output-on-failure
+ctest --test-dir build -R marketdata --output-on-failure
 ```
 
 Run the built binary (from `build/`):
 
 ```bash
-./build/test_marketdata_orderbook
-./build/test_marketdata_orderbook --verbose
-./build/test_marketdata_orderbook --ws-smoke
+./build/test_marketdata
+./build/test_marketdata --verbose
+./build/test_marketdata --ws-smoke
 ```
 
 ### Make
@@ -46,20 +46,20 @@ Run the built binary (from `build/`):
 Build the executable only:
 
 ```bash
-make test_marketdata_orderbook
+make test_marketdata
 ```
 
 Build (if needed) and run it:
 
 ```bash
-make run_test_marketdata_orderbook
+make run_test_marketdata
 ```
 
 After a Make build, the binary is at the repo root:
 
 ```bash
-./test_marketdata_orderbook --verbose
-./test_marketdata_orderbook --ws-smoke
+./test_marketdata --verbose
+./test_marketdata --ws-smoke
 ```
 
 ### Flags
@@ -71,7 +71,7 @@ After a Make build, the binary is at the repo root:
 
 ---
 
-## `test_orderbook_live_compare`
+## `test_orderbook`
 
 **Not** registered in CTest (build and run explicitly). Defaults are in the binary; no env vars.
 
@@ -82,15 +82,15 @@ Build:
 ```bash
 cmake -S . -B build
 cmake --build build -j
-cmake --build build --target test_orderbook_live_compare
+cmake --build build --target test_orderbook
 ```
 
 Run the built binary:
 
 ```bash
-./build/test_orderbook_live_compare
-./build/test_orderbook_live_compare --live
-./build/test_orderbook_live_compare --help
+./build/test_orderbook
+./build/test_orderbook --live
+./build/test_orderbook --help
 ```
 
 ### Make
@@ -98,20 +98,20 @@ Run the built binary:
 Build the executable only:
 
 ```bash
-make test_orderbook_live_compare
+make test_orderbook
 ```
 
 Build (if needed) and run it:
 
 ```bash
-make run_test_orderbook_live_compare
+make run_test_orderbook
 ```
 
 After a Make build, the binary is at the repo root:
 
 ```bash
-./test_orderbook_live_compare --live
-./test_orderbook_live_compare --help
+./test_orderbook --live
+./test_orderbook --help
 ```
 
 ### Flags

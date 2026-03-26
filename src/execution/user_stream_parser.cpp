@@ -95,6 +95,28 @@ std::optional<double> dbl_order_field(std::string_view json, std::string_view ke
     return out;
 }
 
+std::optional<bool> bool_order_field(std::string_view json, std::string_view key) {
+    const std::string needle = "\"" + std::string(key) + "\":";
+    const auto pos = json.find(needle);
+    if (pos == std::string_view::npos) {
+        return std::nullopt;
+    }
+    std::size_t i = pos + needle.size();
+    while (i < json.size() && (json[i] == ' ' || json[i] == '\t')) {
+        ++i;
+    }
+    if (i >= json.size()) {
+        return std::nullopt;
+    }
+    if (json.compare(i, 4, "true") == 0) {
+        return true;
+    }
+    if (json.compare(i, 5, "false") == 0) {
+        return false;
+    }
+    return std::nullopt;
+}
+
 std::uint64_t parse_client_order_id(std::string_view cid) {
     const std::size_t us = cid.rfind('_');
     const std::size_t start = (us == std::string_view::npos) ? 0 : us + 1;
@@ -176,6 +198,7 @@ std::optional<ExecReport> UserStreamParser::parse_order_trade_update(std::string
     }
     report.last_fill_qty = dbl_order_field(blob, "l").value_or(0.0);
     report.last_fill_price = dbl_order_field(blob, "L").value_or(0.0);
+    report.is_maker = bool_order_field(blob, "m").value_or(false);
 
     const auto sym = str_field(blob, "s");
     if (sym.has_value()) {

@@ -571,6 +571,24 @@ GatewayRestResult BinanceGateway::signed_open_orders() const {
     return last;
 }
 
+GatewayRestResult BinanceGateway::signed_position_risk() const {
+    GatewayRestResult last {};
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        std::string q = "recvWindow=" + std::to_string(recv_window_ms_) + "&timestamp=" + std::to_string(current_epoch_ms());
+        const std::string sig = sign_query(q);
+        const std::string path = "/fapi/v2/positionRisk?" + q + "&signature=" + sig;
+        last = https_request("GET", path, "");
+        if (last.ok) {
+            return last;
+        }
+        if ((last.binance_error_code == -1021 || last.binance_error_code == -5028) && sync_server_time_offset()) {
+            continue;
+        }
+        return last;
+    }
+    return last;
+}
+
 std::int64_t BinanceGateway::current_epoch_ms() const {
     const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                             std::chrono::system_clock::now().time_since_epoch())

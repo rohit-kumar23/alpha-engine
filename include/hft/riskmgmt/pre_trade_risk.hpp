@@ -30,6 +30,7 @@ public:
     explicit PreTradeRisk(RiskConfig config);
     RiskRejectReason validate(const ordermgmt::OrderCommand& cmd) const;
     void on_fill(marketdata::Instrument instrument, double signed_qty);
+    void set_position(marketdata::Instrument instrument, double position);
     double position(marketdata::Instrument instrument) const;
 
 private:

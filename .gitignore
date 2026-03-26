@@ -7,8 +7,8 @@ compile_commands.json
 cmake_install.cmake
 install_manifest.txt
 alpha_engine
-test_marketdata_orderbook
-test_orderbook_live_compare
+test_marketdata
+test_orderbook
 *.o
 *.obj
 *.so

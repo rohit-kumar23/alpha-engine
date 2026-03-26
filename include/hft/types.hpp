@@ -53,6 +53,7 @@ struct Fill {
     double price {};
     double qty {};
     std::uint64_t ts_ns {};
+    bool is_maker {false};
 };
 
 std::vector<MarketEvent> sample_events();

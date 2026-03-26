@@ -67,6 +67,7 @@ public:
     explicit BinanceGateway(GatewayConfig config);
     GatewaySendResult send(const ordermgmt::OrderCommand& cmd);
     GatewayRestResult signed_open_orders() const;
+    GatewayRestResult signed_position_risk() const;
     SymbolConstraints symbol_constraints(marketdata::Instrument instrument) const;
 
 private:

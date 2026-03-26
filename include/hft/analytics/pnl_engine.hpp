@@ -13,12 +13,13 @@ struct PnLState {
 
 class PnLEngine {
 public:
-    explicit PnLEngine(double fee_bps);
+    explicit PnLEngine(double taker_fee_bps, double maker_fee_bps = -1.0);
     void on_fill(const Fill& fill, PnLState& state) const;
     double mark_to_market(const PnLState& state, double mid_price) const;
 
 private:
-    double fee_bps_ {0.0};
+    double taker_fee_bps_ {0.0};
+    double maker_fee_bps_ {0.0};
 };
 
 } // namespace hft

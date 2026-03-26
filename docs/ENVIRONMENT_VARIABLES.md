@@ -388,7 +388,7 @@ Many values are stored as integers to avoid floating point work in hot paths.
 
 ## Test binaries
 
-`test_marketdata_orderbook` and `test_orderbook_live_compare` do **not** read environment variables for their own configuration; defaults and command-line flags are documented in [`COMPONENT_TESTING_SUITE.md`](COMPONENT_TESTING_SUITE.md).
+`test_marketdata` and `test_orderbook` do **not** read environment variables for their own configuration; defaults and command-line flags are documented in [`COMPONENT_TESTING_SUITE.md`](COMPONENT_TESTING_SUITE.md).
 
 ## Recommended Profiles
 
