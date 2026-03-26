@@ -165,10 +165,27 @@ std::optional<OrderCommand> OrderManager::on_quote(marketdata::Instrument instru
         };
     };
 
-    if (const auto cmd = eval_side(Side::Buy, quote.bid); cmd.has_value()) {
+    const bool buy_first = prefer_buy_first_[sym_idx];
+    if (buy_first) {
+        if (const auto cmd = eval_side(Side::Buy, quote.bid); cmd.has_value()) {
+            prefer_buy_first_[sym_idx] = false;
+            return cmd;
+        }
+        if (const auto cmd = eval_side(Side::Sell, quote.ask); cmd.has_value()) {
+            prefer_buy_first_[sym_idx] = true;
+            return cmd;
+        }
+        return std::nullopt;
+    }
+    if (const auto cmd = eval_side(Side::Sell, quote.ask); cmd.has_value()) {
+        prefer_buy_first_[sym_idx] = true;
         return cmd;
     }
-    return eval_side(Side::Sell, quote.ask);
+    if (const auto cmd = eval_side(Side::Buy, quote.bid); cmd.has_value()) {
+        prefer_buy_first_[sym_idx] = false;
+        return cmd;
+    }
+    return std::nullopt;
 }
 
 void OrderManager::on_command_rejected(const OrderCommand& cmd) {
@@ -207,6 +224,16 @@ std::size_t OrderManager::active_orders() const {
     std::size_t count = 0;
     for (const auto& slot : slots_) {
         if (slot.live) {
+            ++count;
+        }
+    }
+    return count;
+}
+
+std::size_t OrderManager::active_orders(marketdata::Instrument instrument) const {
+    std::size_t count = 0;
+    for (const auto& slot : slots_) {
+        if (slot.live && slot.instrument == instrument) {
             ++count;
         }
     }

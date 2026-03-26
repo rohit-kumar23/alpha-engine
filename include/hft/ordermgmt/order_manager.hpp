@@ -38,6 +38,7 @@ public:
     void on_command_rejected(const OrderCommand& cmd);
     void on_exec_report(const execution::ExecReport& report);
     std::size_t active_orders() const;
+    std::size_t active_orders(marketdata::Instrument instrument) const;
     std::array<std::uint64_t, 3> cancel_opposite_counts() const;
     std::array<std::uint64_t, 3> cancel_stale_counts() const;
     std::array<std::uint64_t, 3> cancel_adverse_counts() const;
@@ -75,6 +76,7 @@ private:
     std::array<std::uint64_t, 3> cancel_opposite_counts_ {0, 0, 0};
     std::array<std::uint64_t, 3> cancel_stale_counts_ {0, 0, 0};
     std::array<std::uint64_t, 3> cancel_adverse_counts_ {0, 0, 0};
+    std::array<bool, 3> prefer_buy_first_ {true, true, true};
 };
 
 } // namespace hft::ordermgmt

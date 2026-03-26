@@ -967,7 +967,11 @@ int main() {
     std::array<StrategyState, 3> strategy_states;
     std::array<hft::PnLState, 3> pnl_states;
     std::array<double, 3> mid_px_by_symbol {0.0, 0.0, 0.0};
-    std::array<double, 3> pnl_peak_by_symbol {0.0, 0.0, 0.0};
+    std::array<double, 3> pnl_peak_by_symbol {
+        std::numeric_limits<double>::lowest(),
+        std::numeric_limits<double>::lowest(),
+        std::numeric_limits<double>::lowest(),
+    };
     std::array<std::uint64_t, 3> pnl_pause_until_ns {0, 0, 0};
     const std::array<double, 3> pnl_max_dd_by_symbol {
         pnl_max_dd_usdt_btc,
@@ -992,6 +996,9 @@ int main() {
             risk.set_position(kInstruments[i], pos);
             pnl_states[i].inventory = pos;
             pnl_states[i].avg_price = (std::abs(pos) > 1e-12) ? entry : 0.0;
+            pnl_peak_by_symbol[i] = pnl_engine.mark_to_market(
+                pnl_states[i],
+                pnl_states[i].avg_price > 0.0 ? pnl_states[i].avg_price : 1.0);
             std::cout << "preflight kind=position_seed sym=" << kSymbols[i]
                       << " pos=" << pos
                       << " entry=" << pnl_states[i].avg_price
@@ -1660,7 +1667,8 @@ int main() {
                             queue_to_strategy_ns_max = q2s_ns;
                         }
                     }
-                    if (quote.bid.has_value() || quote.ask.has_value() || order_manager.active_orders() > 0) {
+                    if (quote.bid.has_value() || quote.ask.has_value() ||
+                        order_manager.active_orders(event.instrument) > 0) {
                         ++strategy_signals;
                         if (quote.bid.has_value() || quote.ask.has_value()) {
                             ++intent_generated;
