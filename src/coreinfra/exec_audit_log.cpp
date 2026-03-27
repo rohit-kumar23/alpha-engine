@@ -64,7 +64,10 @@ void ExecAuditLog::writer_loop() {
         if (ring_->pop(rec)) {
             if (out_ != nullptr && rec.len > 0) {
                 std::fwrite(rec.data, 1, rec.len, out_);
-                std::fputc('\n', out_);
+                // Avoid double newlines when the record already ends with \n (vsnprintf fmt).
+                if (rec.data[rec.len - 1] != '\n') {
+                    std::fputc('\n', out_);
+                }
             }
             continue;
         }
@@ -76,7 +79,9 @@ void ExecAuditLog::writer_loop() {
     while (ring_->pop(rec)) {
         if (out_ != nullptr && rec.len > 0) {
             std::fwrite(rec.data, 1, rec.len, out_);
-            std::fputc('\n', out_);
+            if (rec.data[rec.len - 1] != '\n') {
+                std::fputc('\n', out_);
+            }
         }
     }
 }
