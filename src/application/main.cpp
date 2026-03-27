@@ -260,14 +260,14 @@ const char* resolve_pair_audit_path(const char* raw) {
     return raw;
 }
 
-void exec_audit_line(
+bool exec_audit_line(
     bool enabled,
     hft::coreinfra::ExecAuditLog& log,
     std::uint64_t& drop_count,
     const char* fmt,
     ...) {
     if (!enabled) {
-        return;
+        return false;
     }
     char buf[sizeof(hft::coreinfra::ExecAuditRecord::data)];
     std::va_list ap;
@@ -275,11 +275,13 @@ void exec_audit_line(
     const int n = std::vsnprintf(buf, sizeof(buf), fmt, ap);
     va_end(ap);
     if (n <= 0 || n >= static_cast<int>(sizeof(buf))) {
-        return;
+        return false;
     }
     if (!log.try_push(buf, static_cast<std::uint16_t>(n))) {
         ++drop_count;
+        return false;
     }
+    return true;
 }
 
 int read_env_int_or_default(const char* name, int fallback) {
@@ -1208,6 +1210,9 @@ int main() {
         double ask_fill_notional {0.0};
         bool bid_terminal {false};
         bool ask_terminal {false};
+        /// Last terminal disposition for this leg (set once): R=reject C=cancel F=filled-done H=heal
+        char bid_term_tag {'\0'};
+        char ask_term_tag {'\0'};
         double buy_qty {0.0};
         double buy_notional {0.0};
         double sell_qty {0.0};
@@ -1224,10 +1229,21 @@ int main() {
     std::array<PairTrack, kPairTrackCap> pair_tracks {};
     std::array<CoidPairRef, kPairCoidCap> pair_by_coid {};
     std::array<std::uint64_t, 3> current_pair_id_by_symbol {0, 0, 0};
+    struct LastIntentQuote {
+        bool valid {false};
+        bool has_bid {false};
+        bool has_ask {false};
+        double bid_px {0.0};
+        double bid_qty {0.0};
+        double ask_px {0.0};
+        double ask_qty {0.0};
+    };
+    std::array<LastIntentQuote, 3> last_intent_quote_by_symbol {};
     std::uint64_t pair_seq = 0;
     std::uint64_t pair_track_overflow = 0;
     std::uint64_t pair_coid_overflow = 0;
-    std::uint64_t pair_emitted = 0;
+    std::uint64_t pair_close_logged = 0;
+    std::uint64_t pair_intent_logged = 0;
 
     std::atomic<std::uint64_t> rx_count {0};
     std::atomic<std::uint64_t> drop_count {0};
@@ -1547,6 +1563,46 @@ int main() {
         }
     }
 
+    auto store_last_intent_quote = [&](std::size_t sym_ix, const hft::QuoteIntent& quote) {
+        LastIntentQuote& s = last_intent_quote_by_symbol[sym_ix];
+        s.valid = true;
+        s.has_bid = quote.bid.has_value();
+        s.has_ask = quote.ask.has_value();
+        if (s.has_bid) {
+            s.bid_px = quote.bid->price;
+            s.bid_qty = quote.bid->qty;
+        }
+        if (s.has_ask) {
+            s.ask_px = quote.ask->price;
+            s.ask_qty = quote.ask->qty;
+        }
+    };
+    auto quote_matches_last_intent = [&](std::size_t sym_ix, const hft::QuoteIntent& q) -> bool {
+        const LastIntentQuote& s = last_intent_quote_by_symbol[sym_ix];
+        if (!s.valid) {
+            return false;
+        }
+        if (s.has_bid != q.bid.has_value() || s.has_ask != q.ask.has_value()) {
+            return false;
+        }
+        if (s.has_bid) {
+            if (std::abs(q.bid->price - s.bid_px) > 1e-8) {
+                return false;
+            }
+            if (std::abs(q.bid->qty - s.bid_qty) > 1e-12) {
+                return false;
+            }
+        }
+        if (s.has_ask) {
+            if (std::abs(q.ask->price - s.ask_px) > 1e-8) {
+                return false;
+            }
+            if (std::abs(q.ask->qty - s.ask_qty) > 1e-12) {
+                return false;
+            }
+        }
+        return true;
+    };
     auto find_pair_slot = [&](std::uint64_t pair_id) -> PairTrack* {
         if (pair_id == 0) {
             return nullptr;
@@ -1560,36 +1616,90 @@ int main() {
         }
         return nullptr;
     };
+    auto emit_pair_close_audit = [&](std::uint64_t intent_id,
+        Instrument instrument,
+        std::uint64_t ts_ns,
+        const char* reason,
+        double matched_qty,
+        double pair_pnl,
+        std::uint64_t open_coids,
+        std::uint64_t sb_coid,
+        std::uint64_t sa_coid,
+        char bid_tag,
+        char ask_tag,
+        double bid_avg_fill,
+        double bid_fill_qty,
+        double ask_avg_fill,
+        double ask_fill_qty) -> bool {
+        if (!pair_audit_on) {
+            return false;
+        }
+        const bool ok1 = exec_audit_line(
+            pair_audit_on,
+            pair_audit_log,
+            pair_audit_drops,
+            "ts_ns=%llu event=pair_close reason=%s intent=%llu sym=%s m=%.6f pnl=%.6f oc=%llu\n",
+            static_cast<unsigned long long>(ts_ns),
+            reason,
+            static_cast<unsigned long long>(intent_id),
+            instrument_name(instrument),
+            matched_qty,
+            pair_pnl,
+            static_cast<unsigned long long>(open_coids));
+        const bool ok2 = exec_audit_line(
+            pair_audit_on,
+            pair_audit_log,
+            pair_audit_drops,
+            "ts_ns=%llu event=pair_close_detail intent=%llu sym=%s sb=%llu sa=%llu b=%c@%.2f/%.6f a=%c@%.2f/%.6f\n",
+            static_cast<unsigned long long>(ts_ns),
+            static_cast<unsigned long long>(intent_id),
+            instrument_name(instrument),
+            static_cast<unsigned long long>(sb_coid),
+            static_cast<unsigned long long>(sa_coid),
+            static_cast<int>(static_cast<unsigned char>(bid_tag)),
+            bid_avg_fill,
+            bid_fill_qty,
+            static_cast<int>(static_cast<unsigned char>(ask_tag)),
+            ask_avg_fill,
+            ask_fill_qty);
+        if (!ok1 || !ok2) {
+            return false;
+        }
+        ++pair_close_logged;
+        return true;
+    };
     auto emit_pair_record = [&](PairTrack& p, std::uint64_t ts_ns, const char* reason) {
         if (!pair_audit_on || !p.active || p.emitted) {
             return;
         }
-        const double bid_avg_fill_px = p.bid_fill_qty > 0.0 ? (p.bid_fill_notional / p.bid_fill_qty) : 0.0;
-        const double ask_avg_fill_px = p.ask_fill_qty > 0.0 ? (p.ask_fill_notional / p.ask_fill_qty) : 0.0;
         const double buy_avg_px = p.buy_qty > 0.0 ? (p.buy_notional / p.buy_qty) : 0.0;
         const double sell_avg_px = p.sell_qty > 0.0 ? (p.sell_notional / p.sell_qty) : 0.0;
         const double matched_qty = std::min(p.buy_qty, p.sell_qty);
         const double pair_pnl = matched_qty > 0.0 ? ((sell_avg_px - buy_avg_px) * matched_qty) : 0.0;
-        exec_audit_line(
-            pair_audit_on,
-            pair_audit_log,
-            pair_audit_drops,
-            "ts_ns=%llu event=pair_close reason=%s pair=%llu sym=%s ib=%u@%.2f/%.6f ia=%u@%.2f/%.6f sb=%llu@%.2f sa=%llu@%.2f fb=%.6f@%.2f fa=%.6f@%.2f matched=%.6f pnl=%.6f open=%llu\n",
-            static_cast<unsigned long long>(ts_ns),
+        const double bid_avg_fill = p.bid_fill_qty > 0.0 ? (p.bid_fill_notional / p.bid_fill_qty) : 0.0;
+        const double ask_avg_fill = p.ask_fill_qty > 0.0 ? (p.ask_fill_notional / p.ask_fill_qty) : 0.0;
+        const char bid_c = !p.intent_bid ? '-' : (p.bid_term_tag != '\0' ? p.bid_term_tag : '?');
+        const char ask_c = !p.intent_ask ? '-' : (p.ask_term_tag != '\0' ? p.ask_term_tag : '?');
+        const bool ok = emit_pair_close_audit(
+            p.pair_id,
+            p.instrument,
+            ts_ns,
             reason,
-            static_cast<unsigned long long>(p.pair_id),
-            instrument_name(p.instrument),
-            p.intent_bid ? 1U : 0U, p.intent_bid_px, p.intent_bid_qty,
-            p.intent_ask ? 1U : 0U, p.intent_ask_px, p.intent_ask_qty,
-            static_cast<unsigned long long>(p.bid_last_coid), p.bid_last_limit_px,
-            static_cast<unsigned long long>(p.ask_last_coid), p.ask_last_limit_px,
-            p.bid_fill_qty, bid_avg_fill_px,
-            p.ask_fill_qty, ask_avg_fill_px,
             matched_qty,
             pair_pnl,
-            static_cast<unsigned long long>(p.open_coids));
+            p.open_coids,
+            p.bid_last_coid,
+            p.ask_last_coid,
+            bid_c,
+            ask_c,
+            bid_avg_fill,
+            p.bid_fill_qty,
+            ask_avg_fill,
+            p.ask_fill_qty);
+        if (!ok) {
+            return;
+        }
         p.emitted = true;
-        ++pair_emitted;
     };
     auto try_finalize_pair = [&](PairTrack& p, std::uint64_t ts_ns, const char* reason) {
         if (!p.active || p.emitted) {
@@ -1632,16 +1742,26 @@ int main() {
         }
         return nullptr;
     };
+    auto supersede_open_pairs_for_symbol = [&](Instrument instrument, std::uint64_t ts_ns) {
+        for (PairTrack& p : pair_tracks) {
+            if (!p.active || p.emitted || p.instrument != instrument) {
+                continue;
+            }
+            emit_pair_record(p, ts_ns, "superseded");
+        }
+    };
     auto begin_pair_from_intent = [&](Instrument instrument, const hft::QuoteIntent& quote, std::uint64_t ts_ns) {
         if (!quote.bid.has_value() && !quote.ask.has_value()) {
             return;
         }
+        supersede_open_pairs_for_symbol(instrument, ts_ns);
         const std::uint64_t pair_id = ++pair_seq;
         const std::size_t base = static_cast<std::size_t>(pair_id % kPairTrackCap);
         PairTrack* slot = nullptr;
         for (std::size_t probe = 0; probe < 8; ++probe) {
             PairTrack& s = pair_tracks[(base + probe) % kPairTrackCap];
-            if (!s.active || s.emitted || s.open_coids == 0) {
+            // Do not reuse a slot while client orders may still resolve to this pair_id.
+            if (!s.active || s.open_coids == 0) {
                 slot = &s;
                 break;
             }
@@ -1667,8 +1787,28 @@ int main() {
             slot->intent_ask_qty = quote.ask->qty;
         }
         current_pair_id_by_symbol[instrument_index(instrument)] = pair_id;
+        if (pair_audit_on) {
+            const bool logged = exec_audit_line(
+                pair_audit_on,
+                pair_audit_log,
+                pair_audit_drops,
+                "ts_ns=%llu event=pair_intent intent=%llu sym=%s ib=%u@%.2f/%.6f ia=%u@%.2f/%.6f\n",
+                static_cast<unsigned long long>(ts_ns),
+                static_cast<unsigned long long>(pair_id),
+                instrument_name(instrument),
+                slot->intent_bid ? 1U : 0U,
+                slot->intent_bid_px,
+                slot->intent_bid_qty,
+                slot->intent_ask ? 1U : 0U,
+                slot->intent_ask_px,
+                slot->intent_ask_qty);
+            if (logged) {
+                ++pair_intent_logged;
+            }
+        }
+        store_last_intent_quote(instrument_index(instrument), quote);
     };
-    auto mark_pair_local_terminal = [&](std::uint64_t coid, std::uint64_t ts_ns, const char* reason) {
+    auto mark_pair_local_terminal = [&](std::uint64_t coid, std::uint64_t ts_ns, const char* reason, char tag = 'H') {
         CoidPairRef* ref = find_coid_pair(coid);
         if (ref == nullptr) {
             return;
@@ -1687,8 +1827,14 @@ int main() {
         }
         if (ref->side == Side::Buy) {
             p->bid_terminal = true;
+            if (p->bid_term_tag == '\0') {
+                p->bid_term_tag = tag;
+            }
         } else {
             p->ask_terminal = true;
+            if (p->ask_term_tag == '\0') {
+                p->ask_term_tag = tag;
+            }
         }
         try_finalize_pair(*p, ts_ns, reason);
     };
@@ -1959,10 +2105,22 @@ int main() {
                     }
                 }
                 if (pair_ref != nullptr) {
+                    char tag = 'F';
+                    if (msg.report.type == ExecEventType::Reject) {
+                        tag = 'R';
+                    } else if (msg.report.type == ExecEventType::Canceled) {
+                        tag = 'C';
+                    }
                     if (pair_ref->side == Side::Buy) {
                         pair_slot->bid_terminal = true;
+                        if (pair_slot->bid_term_tag == '\0') {
+                            pair_slot->bid_term_tag = tag;
+                        }
                     } else {
                         pair_slot->ask_terminal = true;
+                        if (pair_slot->ask_term_tag == '\0') {
+                            pair_slot->ask_term_tag = tag;
+                        }
                     }
                 }
                 try_finalize_pair(*pair_slot, msg.ts_ns, "terminal");
@@ -2139,7 +2297,35 @@ int main() {
                         ++strategy_signals;
                         if (quote.bid.has_value() || quote.ask.has_value()) {
                             ++intent_generated;
-                            begin_pair_from_intent(event.instrument, quote, strategy_ts);
+                            const std::size_t sym_ix_q = instrument_index(event.instrument);
+                            if (pair_audit_on && quote_matches_last_intent(sym_ix_q, quote)) {
+                                const std::uint64_t intent_id = current_pair_id_by_symbol[sym_ix_q];
+                                if (intent_id != 0) {
+                                    // "Unchanged" does not create a new PairTrack; keep `pair_intent`
+                                    // reserved for real pair starts only.
+                                    emit_pair_close_audit(
+                                        intent_id,
+                                        event.instrument,
+                                        strategy_ts,
+                                        "unchanged",
+                                        0.0,
+                                        0.0,
+                                        0ULL,
+                                        0ULL,
+                                        0ULL,
+                                        'U',
+                                        'U',
+                                        0.0,
+                                        0.0,
+                                        0.0,
+                                        0.0);
+                                    store_last_intent_quote(sym_ix_q, quote);
+                                } else {
+                                    begin_pair_from_intent(event.instrument, quote, strategy_ts);
+                                }
+                            } else {
+                                begin_pair_from_intent(event.instrument, quote, strategy_ts);
+                            }
                         }
                         const auto cmd = order_manager.on_quote(event.instrument, quote, strategy_ts);
                         if (cmd.has_value()) {
@@ -2743,7 +2929,8 @@ int main() {
                       << " gw_last_ix=" << gw_fail_last_ix
                       << " exec_audit_drop=" << exec_audit_drops
                       << " pair_audit_drop=" << pair_audit_drops
-                      << " pair_emitted=" << pair_emitted
+                      << " pair_close_logged=" << pair_close_logged
+                      << " pair_intent_logged=" << pair_intent_logged
                       << " pair_slot_overflow=" << pair_track_overflow
                       << " pair_coid_overflow=" << pair_coid_overflow
                       << " rec_exch_open=" << g_reconcile_remote_open.load(std::memory_order_relaxed)
