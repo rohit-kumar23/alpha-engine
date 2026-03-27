@@ -216,6 +216,7 @@ const char* binance_mode_label(hft::marketdata::BinanceExecutionMode mode) {
 // Typical Linux: /tmp is often tmpfs — faster, lower jitter than HDD for the audit writer thread.
 inline constexpr const char* kExecAuditDefaultPath = "/tmp/alpha_exec_audit.log";
 inline constexpr const char* kMdHealthDefaultPath = "/tmp/alpha_md_health.log";
+inline constexpr const char* kPairAuditDefaultPath = "/tmp/alpha_pair_pnl.log";
 
 const char* resolve_exec_audit_path(const char* raw) {
     if (raw == nullptr || raw[0] == '\0') {
@@ -241,6 +242,20 @@ const char* resolve_md_health_path(const char* raw) {
     }
     if (m == "1" || m == "yes" || m == "on" || m == "true") {
         return kMdHealthDefaultPath;
+    }
+    return raw;
+}
+
+const char* resolve_pair_audit_path(const char* raw) {
+    if (raw == nullptr || raw[0] == '\0') {
+        return nullptr;
+    }
+    const std::string m = env_value_lowered(raw);
+    if (m == "0" || m == "off" || m == "no" || m == "false") {
+        return nullptr;
+    }
+    if (m == "1" || m == "yes" || m == "on" || m == "true") {
+        return kPairAuditDefaultPath;
     }
     return raw;
 }
@@ -561,6 +576,17 @@ int main() {
         std::cerr << "warn=md_health_open_failed path=" << md_health_resolved << '\n';
     }
     std::uint64_t md_health_drops = 0;
+    hft::coreinfra::ExecAuditRing pair_audit_ring;
+    hft::coreinfra::ExecAuditLog pair_audit_log;
+    const char* const pair_audit_env = std::getenv("HFT_PAIR_AUDIT_LOG");
+    const char* const pair_audit_resolved = resolve_pair_audit_path(pair_audit_env != nullptr ? pair_audit_env : "1");
+    const bool pair_audit_on =
+        pair_audit_resolved != nullptr && pair_audit_resolved[0] != '\0' &&
+        pair_audit_log.start(pair_audit_resolved, &pair_audit_ring);
+    if (pair_audit_resolved != nullptr && pair_audit_resolved[0] != '\0' && !pair_audit_on) {
+        std::cerr << "warn=pair_audit_open_failed path=" << pair_audit_resolved << '\n';
+    }
+    std::uint64_t pair_audit_drops = 0;
 
     std::signal(SIGINT, handle_signal);
     std::signal(SIGTERM, handle_signal);
@@ -910,6 +936,8 @@ int main() {
               << " kill_switch=" << (g_kill_switch.load(std::memory_order_relaxed) ? 1 : 0)
               << " exec_audit=" << (exec_audit_on ? 1 : 0)
               << " exec_audit_path=" << (exec_audit_on ? exec_audit_resolved : "-")
+              << " pair_audit=" << (pair_audit_on ? 1 : 0)
+              << " pair_audit_path=" << (pair_audit_on ? pair_audit_resolved : "-")
               << " md_health_log=" << (md_health_on ? 1 : 0)
               << " md_health_path=" << (md_health_on ? md_health_resolved : "-")
               << " sigusr1_kill_toggle=" << (sigusr1_toggle_kill ? 1 : 0)
@@ -1152,6 +1180,54 @@ int main() {
     };
     constexpr std::size_t kLifecycleCap = 4096;
     std::array<LifecycleEntry, kLifecycleCap> lifecycle {};
+    struct PairTrack {
+        bool active {false};
+        bool emitted {false};
+        std::uint64_t pair_id {0};
+        Instrument instrument {Instrument::Unknown};
+        std::uint64_t ts_intent_ns {0};
+        bool intent_bid {false};
+        bool intent_ask {false};
+        double intent_bid_px {0.0};
+        double intent_bid_qty {0.0};
+        double intent_ask_px {0.0};
+        double intent_ask_qty {0.0};
+        std::uint64_t open_coids {0};
+        std::uint64_t cmd_sent {0};
+        std::uint64_t fills {0};
+        std::uint64_t cancels {0};
+        std::uint64_t rejects {0};
+        std::uint64_t ts_last_event_ns {0};
+        std::uint64_t bid_last_coid {0};
+        std::uint64_t ask_last_coid {0};
+        double bid_last_limit_px {0.0};
+        double ask_last_limit_px {0.0};
+        double bid_fill_qty {0.0};
+        double ask_fill_qty {0.0};
+        double bid_fill_notional {0.0};
+        double ask_fill_notional {0.0};
+        bool bid_terminal {false};
+        bool ask_terminal {false};
+        double buy_qty {0.0};
+        double buy_notional {0.0};
+        double sell_qty {0.0};
+        double sell_notional {0.0};
+    };
+    struct CoidPairRef {
+        bool active {false};
+        std::uint64_t client_order_id {0};
+        std::uint64_t pair_id {0};
+        Side side {Side::Buy};
+    };
+    constexpr std::size_t kPairTrackCap = 2048;
+    constexpr std::size_t kPairCoidCap = 4096;
+    std::array<PairTrack, kPairTrackCap> pair_tracks {};
+    std::array<CoidPairRef, kPairCoidCap> pair_by_coid {};
+    std::array<std::uint64_t, 3> current_pair_id_by_symbol {0, 0, 0};
+    std::uint64_t pair_seq = 0;
+    std::uint64_t pair_track_overflow = 0;
+    std::uint64_t pair_coid_overflow = 0;
+    std::uint64_t pair_emitted = 0;
 
     std::atomic<std::uint64_t> rx_count {0};
     std::atomic<std::uint64_t> drop_count {0};
@@ -1471,6 +1547,152 @@ int main() {
         }
     }
 
+    auto find_pair_slot = [&](std::uint64_t pair_id) -> PairTrack* {
+        if (pair_id == 0) {
+            return nullptr;
+        }
+        const std::size_t base = static_cast<std::size_t>(pair_id % kPairTrackCap);
+        for (std::size_t probe = 0; probe < 8; ++probe) {
+            PairTrack& s = pair_tracks[(base + probe) % kPairTrackCap];
+            if (s.active && s.pair_id == pair_id) {
+                return &s;
+            }
+        }
+        return nullptr;
+    };
+    auto emit_pair_record = [&](PairTrack& p, std::uint64_t ts_ns, const char* reason) {
+        if (!pair_audit_on || !p.active || p.emitted) {
+            return;
+        }
+        const double bid_avg_fill_px = p.bid_fill_qty > 0.0 ? (p.bid_fill_notional / p.bid_fill_qty) : 0.0;
+        const double ask_avg_fill_px = p.ask_fill_qty > 0.0 ? (p.ask_fill_notional / p.ask_fill_qty) : 0.0;
+        const double buy_avg_px = p.buy_qty > 0.0 ? (p.buy_notional / p.buy_qty) : 0.0;
+        const double sell_avg_px = p.sell_qty > 0.0 ? (p.sell_notional / p.sell_qty) : 0.0;
+        const double matched_qty = std::min(p.buy_qty, p.sell_qty);
+        const double pair_pnl = matched_qty > 0.0 ? ((sell_avg_px - buy_avg_px) * matched_qty) : 0.0;
+        exec_audit_line(
+            pair_audit_on,
+            pair_audit_log,
+            pair_audit_drops,
+            "ts_ns=%llu event=pair_close reason=%s pair=%llu sym=%s ib=%u@%.2f/%.6f ia=%u@%.2f/%.6f sb=%llu@%.2f sa=%llu@%.2f fb=%.6f@%.2f fa=%.6f@%.2f matched=%.6f pnl=%.6f open=%llu\n",
+            static_cast<unsigned long long>(ts_ns),
+            reason,
+            static_cast<unsigned long long>(p.pair_id),
+            instrument_name(p.instrument),
+            p.intent_bid ? 1U : 0U, p.intent_bid_px, p.intent_bid_qty,
+            p.intent_ask ? 1U : 0U, p.intent_ask_px, p.intent_ask_qty,
+            static_cast<unsigned long long>(p.bid_last_coid), p.bid_last_limit_px,
+            static_cast<unsigned long long>(p.ask_last_coid), p.ask_last_limit_px,
+            p.bid_fill_qty, bid_avg_fill_px,
+            p.ask_fill_qty, ask_avg_fill_px,
+            matched_qty,
+            pair_pnl,
+            static_cast<unsigned long long>(p.open_coids));
+        p.emitted = true;
+        ++pair_emitted;
+    };
+    auto try_finalize_pair = [&](PairTrack& p, std::uint64_t ts_ns, const char* reason) {
+        if (!p.active || p.emitted) {
+            return;
+        }
+        const bool bid_done = !p.intent_bid || p.bid_terminal;
+        const bool ask_done = !p.intent_ask || p.ask_terminal;
+        if (p.open_coids == 0 && bid_done && ask_done) {
+            emit_pair_record(p, ts_ns, reason);
+        }
+    };
+    auto upsert_coid_pair = [&](std::uint64_t coid, std::uint64_t pair_id, Side side) -> CoidPairRef* {
+        if (coid == 0 || pair_id == 0) {
+            return nullptr;
+        }
+        const std::size_t base = static_cast<std::size_t>(coid % kPairCoidCap);
+        for (std::size_t probe = 0; probe < 8; ++probe) {
+            CoidPairRef& ref = pair_by_coid[(base + probe) % kPairCoidCap];
+            if (!ref.active || ref.client_order_id == coid) {
+                ref.active = true;
+                ref.client_order_id = coid;
+                ref.pair_id = pair_id;
+                ref.side = side;
+                return &ref;
+            }
+        }
+        ++pair_coid_overflow;
+        return nullptr;
+    };
+    auto find_coid_pair = [&](std::uint64_t coid) -> CoidPairRef* {
+        if (coid == 0) {
+            return nullptr;
+        }
+        const std::size_t base = static_cast<std::size_t>(coid % kPairCoidCap);
+        for (std::size_t probe = 0; probe < 8; ++probe) {
+            CoidPairRef& ref = pair_by_coid[(base + probe) % kPairCoidCap];
+            if (ref.active && ref.client_order_id == coid) {
+                return &ref;
+            }
+        }
+        return nullptr;
+    };
+    auto begin_pair_from_intent = [&](Instrument instrument, const hft::QuoteIntent& quote, std::uint64_t ts_ns) {
+        if (!quote.bid.has_value() && !quote.ask.has_value()) {
+            return;
+        }
+        const std::uint64_t pair_id = ++pair_seq;
+        const std::size_t base = static_cast<std::size_t>(pair_id % kPairTrackCap);
+        PairTrack* slot = nullptr;
+        for (std::size_t probe = 0; probe < 8; ++probe) {
+            PairTrack& s = pair_tracks[(base + probe) % kPairTrackCap];
+            if (!s.active || s.emitted || s.open_coids == 0) {
+                slot = &s;
+                break;
+            }
+        }
+        if (slot == nullptr) {
+            ++pair_track_overflow;
+            return;
+        }
+        *slot = PairTrack {};
+        slot->active = true;
+        slot->pair_id = pair_id;
+        slot->instrument = instrument;
+        slot->ts_intent_ns = ts_ns;
+        slot->ts_last_event_ns = ts_ns;
+        slot->intent_bid = quote.bid.has_value();
+        slot->intent_ask = quote.ask.has_value();
+        if (quote.bid.has_value()) {
+            slot->intent_bid_px = quote.bid->price;
+            slot->intent_bid_qty = quote.bid->qty;
+        }
+        if (quote.ask.has_value()) {
+            slot->intent_ask_px = quote.ask->price;
+            slot->intent_ask_qty = quote.ask->qty;
+        }
+        current_pair_id_by_symbol[instrument_index(instrument)] = pair_id;
+    };
+    auto mark_pair_local_terminal = [&](std::uint64_t coid, std::uint64_t ts_ns, const char* reason) {
+        CoidPairRef* ref = find_coid_pair(coid);
+        if (ref == nullptr) {
+            return;
+        }
+        PairTrack* p = find_pair_slot(ref->pair_id);
+        if (p == nullptr) {
+            ref->active = false;
+            return;
+        }
+        p->ts_last_event_ns = ts_ns;
+        if (ref->active) {
+            ref->active = false;
+            if (p->open_coids > 0) {
+                --p->open_coids;
+            }
+        }
+        if (ref->side == Side::Buy) {
+            p->bid_terminal = true;
+        } else {
+            p->ask_terminal = true;
+        }
+        try_finalize_pair(*p, ts_ns, reason);
+    };
+
     while (!g_stop.load(std::memory_order_relaxed)) {
         bool had_work = false;
 
@@ -1523,6 +1745,7 @@ int main() {
                             e.active = false;
                             e.timeout_reported = false;
                         }
+                        mark_pair_local_terminal(terminalized_ids[i], heal_ts, "reconcile_pending");
                     }
                     reconcile_healed_pending_drop_om += static_cast<std::uint64_t>(dropped_om);
                     exec_audit_line(
@@ -1591,6 +1814,7 @@ int main() {
                             static_cast<unsigned long long>(heal_ts),
                             instrument_name(e.instrument),
                             static_cast<unsigned long long>(e.client_order_id));
+                        mark_pair_local_terminal(e.client_order_id, heal_ts, "reconcile_missing");
                         e.active = false;
                         e.timeout_reported = false;
                         ++healed_lifecycle;
@@ -1670,6 +1894,8 @@ int main() {
             static_cast<std::size_t>(exec_report_batch_max > 0 ? exec_report_batch_max : 512);
         ExecReportMsg exec_msg;
         auto process_exec_report = [&](const ExecReportMsg& msg) {
+            CoidPairRef* pair_ref = find_coid_pair(msg.report.client_order_id);
+            PairTrack* pair_slot = (pair_ref != nullptr) ? find_pair_slot(pair_ref->pair_id) : nullptr;
             ++exec_reports;
             if (msg.report.type == ExecEventType::Ack) {
                 ++exec_acks;
@@ -1703,6 +1929,43 @@ int main() {
                 fill.ts_ns = msg.ts_ns;
                 fill.is_maker = msg.report.is_maker;
                 pnl_engine.on_fill(fill, pnl_states[instrument_index(msg.report.instrument)]);
+                if (pair_slot != nullptr) {
+                    ++pair_slot->fills;
+                    pair_slot->ts_last_event_ns = msg.ts_ns;
+                    if (msg.report.side == Side::Buy) {
+                        pair_slot->buy_qty += msg.report.last_fill_qty;
+                        pair_slot->buy_notional += msg.report.last_fill_qty * msg.report.last_fill_price;
+                        pair_slot->bid_fill_qty += msg.report.last_fill_qty;
+                        pair_slot->bid_fill_notional += msg.report.last_fill_qty * msg.report.last_fill_price;
+                    } else {
+                        pair_slot->sell_qty += msg.report.last_fill_qty;
+                        pair_slot->sell_notional += msg.report.last_fill_qty * msg.report.last_fill_price;
+                        pair_slot->ask_fill_qty += msg.report.last_fill_qty;
+                        pair_slot->ask_fill_notional += msg.report.last_fill_qty * msg.report.last_fill_price;
+                    }
+                }
+            }
+            const bool pair_terminal = msg.report.type == ExecEventType::Reject ||
+                msg.report.type == ExecEventType::Canceled || msg.report.terminal;
+            if (pair_slot != nullptr && pair_terminal) {
+                pair_slot->ts_last_event_ns = msg.ts_ns;
+                if (msg.report.type == ExecEventType::Reject) {
+                    ++pair_slot->rejects;
+                }
+                if (pair_ref != nullptr && pair_ref->active) {
+                    pair_ref->active = false;
+                    if (pair_slot->open_coids > 0) {
+                        --pair_slot->open_coids;
+                    }
+                }
+                if (pair_ref != nullptr) {
+                    if (pair_ref->side == Side::Buy) {
+                        pair_slot->bid_terminal = true;
+                    } else {
+                        pair_slot->ask_terminal = true;
+                    }
+                }
+                try_finalize_pair(*pair_slot, msg.ts_ns, "terminal");
             }
             const bool audit_drop_copy = msg.report.type == ExecEventType::Fill ||
                 msg.report.type == ExecEventType::Reject || msg.report.type == ExecEventType::Canceled ||
@@ -1876,6 +2139,7 @@ int main() {
                         ++strategy_signals;
                         if (quote.bid.has_value() || quote.ask.has_value()) {
                             ++intent_generated;
+                            begin_pair_from_intent(event.instrument, quote, strategy_ts);
                         }
                         const auto cmd = order_manager.on_quote(event.instrument, quote, strategy_ts);
                         if (cmd.has_value()) {
@@ -2085,6 +2349,29 @@ int main() {
                                 e.instrument = cmd->instrument;
                                 e.ts_sent_ns = now_send_ns;
                             }
+                            {
+                                const std::uint64_t pair_id = current_pair_id_by_symbol[idx];
+                                if (PairTrack* p = find_pair_slot(pair_id); p != nullptr) {
+                                    p->ts_last_event_ns = now_send_ns;
+                                    ++p->cmd_sent;
+                                    if (cmd->type == CommandType::Cancel) {
+                                        ++p->cancels;
+                                    }
+                                    if (cmd->side == Side::Buy) {
+                                        p->bid_last_coid = cmd->client_order_id;
+                                        p->bid_last_limit_px = cmd->price;
+                                    } else {
+                                        p->ask_last_coid = cmd->client_order_id;
+                                        p->ask_last_limit_px = cmd->price;
+                                    }
+                                    const bool had_ref = find_coid_pair(cmd->client_order_id) != nullptr;
+                                    CoidPairRef* ref = upsert_coid_pair(cmd->client_order_id, pair_id, cmd->side);
+                                    if (ref != nullptr && !had_ref &&
+                                        (cmd->type == CommandType::New || cmd->type == CommandType::Replace)) {
+                                        ++p->open_coids;
+                                    }
+                                }
+                            }
                             last_send_ns_by_symbol[idx] = now_send_ns;
                             exec_audit_line(
                                 exec_audit_on,
@@ -2280,6 +2567,7 @@ int main() {
                                 static_cast<unsigned long long>(e.client_order_id),
                                 om_drop ? 1U : 0U,
                                 oms_drop ? 1U : 0U);
+                            mark_pair_local_terminal(e.client_order_id, now_lc_ns, "timeout_local");
                             e.active = false;
                             e.timeout_reported = false;
                         }
@@ -2454,6 +2742,10 @@ int main() {
                       << " gw_last_http=" << gw_fail_last_http
                       << " gw_last_ix=" << gw_fail_last_ix
                       << " exec_audit_drop=" << exec_audit_drops
+                      << " pair_audit_drop=" << pair_audit_drops
+                      << " pair_emitted=" << pair_emitted
+                      << " pair_slot_overflow=" << pair_track_overflow
+                      << " pair_coid_overflow=" << pair_coid_overflow
                       << " rec_exch_open=" << g_reconcile_remote_open.load(std::memory_order_relaxed)
                       << " rec_mismatch=" << reconcile_mismatch
                       << " rec_heal_om=" << reconcile_healed_om
@@ -2593,6 +2885,14 @@ int main() {
         }
     }
 
+    const std::uint64_t shutdown_ts_ns = now_ns();
+    for (auto& p : pair_tracks) {
+        if (!p.active || p.emitted) {
+            continue;
+        }
+        emit_pair_record(p, shutdown_ts_ns, "shutdown");
+    }
+    pair_audit_log.shutdown_join();
     exec_audit.shutdown_join();
     md_health_log.shutdown_join();
     ws_stop.store(true, std::memory_order_relaxed);
