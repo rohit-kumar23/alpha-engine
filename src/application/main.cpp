@@ -1278,6 +1278,11 @@ int main() {
     std::uint64_t depth_buffered = 0;
     std::uint64_t depth_buffer_replayed = 0;
     std::uint64_t depth_buffer_drop = 0;
+    // Cached sync/ready state to avoid scanning all books per event.
+    std::array<std::uint8_t, 3> book_ready_cache {0, 0, 0};
+    std::array<std::uint8_t, 3> book_sync_cache {0, 0, 0};
+    std::uint8_t ready_symbols_cache = 0;
+    std::uint8_t synced_symbols_cache = 0;
     std::uint64_t canary_rot_window_btc = 0;
     std::uint64_t canary_rot_window_eth = 0;
     std::uint64_t canary_rot_window_sol = 0;
@@ -1500,6 +1505,19 @@ int main() {
                 ++snapshot_applied;
                 snapshot_fail_streak[idx] = 0;
                 next_snapshot_req_ns[idx] = 0;
+                // Update cached ready/sync state (snapshot seed often flips both).
+                const std::uint8_t now_ready = books[idx].is_ready() ? 1U : 0U;
+                const std::uint8_t now_sync = books[idx].is_in_sync() ? 1U : 0U;
+                if (now_ready != book_ready_cache[idx]) {
+                    ready_symbols_cache = static_cast<std::uint8_t>(
+                        ready_symbols_cache + (now_ready ? 1U : 0U) - (book_ready_cache[idx] ? 1U : 0U));
+                    book_ready_cache[idx] = now_ready;
+                }
+                if (now_sync != book_sync_cache[idx]) {
+                    synced_symbols_cache = static_cast<std::uint8_t>(
+                        synced_symbols_cache + (now_sync ? 1U : 0U) - (book_sync_cache[idx] ? 1U : 0U));
+                    book_sync_cache[idx] = now_sync;
+                }
                 pending_depth[idx].replay([&](const MdEvent& e) {
                     ++depth_buffer_replayed;
                     const auto replay_result = books[idx].apply(e);
@@ -1598,21 +1616,29 @@ int main() {
                 depth_buffer_drop += pending_depth[idx].drops;
                 pending_depth[idx].drops = 0;
             }
+            const std::uint8_t was_ready = book_ready_cache[idx];
+            const std::uint8_t was_sync = book_sync_cache[idx];
             const auto apply_result = books[idx].apply(event);
             if (apply_result == hft::orderbook::ApplyResult::OutOfSync) {
                 ++depth_out_of_sync;
                 pending_depth[idx].clear();
             }
-
-            std::uint64_t synced_symbols = 0;
-            for (const auto& b : books) {
-                if (b.is_in_sync()) {
-                    ++synced_symbols;
-                }
+            const std::uint8_t now_ready = books[idx].is_ready() ? 1U : 0U;
+            const std::uint8_t now_sync = books[idx].is_in_sync() ? 1U : 0U;
+            if (now_ready != was_ready) {
+                ready_symbols_cache = static_cast<std::uint8_t>(
+                    ready_symbols_cache + (now_ready ? 1U : 0U) - (was_ready ? 1U : 0U));
+                book_ready_cache[idx] = now_ready;
             }
-            const bool all_symbols_synced = (synced_symbols == instruments.size());
+            if (now_sync != was_sync) {
+                synced_symbols_cache = static_cast<std::uint8_t>(
+                    synced_symbols_cache + (now_sync ? 1U : 0U) - (was_sync ? 1U : 0U));
+                book_sync_cache[idx] = now_sync;
+            }
+
+            const bool all_symbols_synced = (synced_symbols_cache == static_cast<std::uint8_t>(instruments.size()));
             const bool global_trading_ready = !require_all_symbols_sync || all_symbols_synced;
-            const bool symbol_tradable = books[idx].is_ready() && books[idx].is_in_sync() &&
+            const bool symbol_tradable = (book_ready_cache[idx] != 0) && (book_sync_cache[idx] != 0) &&
                 (global_trading_ready || allow_partial_trading);
 
             if (symbol_tradable &&
@@ -2084,8 +2110,6 @@ int main() {
                         }
                         if (exists_remote(e.client_order_id)) {
                             const bool rebound = oms.mark_live_by_client_order_id(e.client_order_id, now_lc_ns);
-                            e.ts_sent_ns = now_lc_ns;
-                            e.timeout_reported = false;
                             exec_audit_line(
                                 exec_audit_on,
                                 exec_audit,
@@ -2095,6 +2119,14 @@ int main() {
                                 instrument_name(e.instrument),
                                 static_cast<unsigned long long>(e.client_order_id),
                                 rebound ? 1U : 0U);
+                            if (rebound) {
+                                e.ts_sent_ns = now_lc_ns;
+                                e.timeout_reported = false;
+                            } else {
+                                // If we cannot rebind locally but the remote still reports open,
+                                // keep the lifecycle entry "timed out" so we keep auditing it.
+                                // (OMS resurrection is expected to make rebound succeed.)
+                            }
                         } else {
                             const bool om_drop = order_manager.reconcile_drop_client_order_id(e.client_order_id);
                             const bool oms_drop = oms.mark_completed_by_client_order_id(e.client_order_id, now_lc_ns);

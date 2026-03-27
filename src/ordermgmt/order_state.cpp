@@ -292,7 +292,9 @@ bool OmsState::mark_live_by_client_order_id(std::uint64_t client_order_id, std::
         if (!order.used || order.client_order_id != client_order_id) {
             continue;
         }
-        if (order.status == OrderStatus::Completed || order.status == OrderStatus::Rejected) {
+        // If reconcile confirms remote is still open, allow "resurrection" from Completed.
+        // (This can happen under transport uncertainty / missing exec reports.)
+        if (order.status == OrderStatus::Rejected) {
             return false;
         }
         order.status = OrderStatus::Live;

@@ -94,6 +94,12 @@ bool ssl_read_exact(SSL* ssl, void* dst, std::size_t len) {
     while (off < len) {
         const int n = SSL_read(ssl, static_cast<char*>(dst) + off, static_cast<int>(len - off));
         if (n <= 0) {
+            const int err = SSL_get_error(ssl, n);
+            if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE) {
+                // Socket timeout / would-block: keep connection alive and retry.
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                continue;
+            }
             return false;
         }
         off += static_cast<std::size_t>(n);
