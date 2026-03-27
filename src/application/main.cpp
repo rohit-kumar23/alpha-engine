@@ -615,6 +615,7 @@ int main() {
     using hft::execution::BinanceUserStream;
     using hft::execution::GatewayConfig;
     using hft::execution::ExecEventType;
+    using hft::ordermgmt::OrderCommand;
     using hft::ordermgmt::OrderManager;
     using hft::execution::UserStreamParser;
     using hft::riskmgmt::RiskRejectReason;
@@ -1184,8 +1185,11 @@ int main() {
     std::array<LifecycleEntry, kLifecycleCap> lifecycle {};
     struct PairTrack {
         bool active {false};
-        bool emitted {false};
         std::uint64_t pair_id {0};
+        /// Strategy emission id for pair-audit grouping (same for bid+ask of this pair).
+        std::uint64_t audit_event_id {0};
+        bool leg_audit_bid_close_emitted {false};
+        bool leg_audit_ask_close_emitted {false};
         Instrument instrument {Instrument::Unknown};
         std::uint64_t ts_intent_ns {0};
         bool intent_bid {false};
@@ -1242,8 +1246,9 @@ int main() {
     std::uint64_t pair_seq = 0;
     std::uint64_t pair_track_overflow = 0;
     std::uint64_t pair_coid_overflow = 0;
-    std::uint64_t pair_close_logged = 0;
-    std::uint64_t pair_intent_logged = 0;
+    std::uint64_t leg_audit_event_seq = 0;
+    std::uint64_t leg_open_logged = 0;
+    std::uint64_t leg_close_logged = 0;
 
     std::atomic<std::uint64_t> rx_count {0};
     std::atomic<std::uint64_t> drop_count {0};
@@ -1616,99 +1621,139 @@ int main() {
         }
         return nullptr;
     };
-    auto emit_pair_close_audit = [&](std::uint64_t intent_id,
+    auto emit_leg_open = [&](std::uint64_t event_id,
         Instrument instrument,
         std::uint64_t ts_ns,
-        const char* reason,
-        double matched_qty,
-        double pair_pnl,
-        std::uint64_t open_coids,
-        std::uint64_t sb_coid,
-        std::uint64_t sa_coid,
-        char bid_tag,
-        char ask_tag,
-        double bid_avg_fill,
-        double bid_fill_qty,
-        double ask_avg_fill,
-        double ask_fill_qty) -> bool {
+        const char* leg,
+        double px,
+        double qty) {
         if (!pair_audit_on) {
-            return false;
-        }
-        const bool ok1 = exec_audit_line(
-            pair_audit_on,
-            pair_audit_log,
-            pair_audit_drops,
-            "ts_ns=%llu event=pair_close reason=%s intent=%llu sym=%s m=%.6f pnl=%.6f oc=%llu\n",
-            static_cast<unsigned long long>(ts_ns),
-            reason,
-            static_cast<unsigned long long>(intent_id),
-            instrument_name(instrument),
-            matched_qty,
-            pair_pnl,
-            static_cast<unsigned long long>(open_coids));
-        const bool ok2 = exec_audit_line(
-            pair_audit_on,
-            pair_audit_log,
-            pair_audit_drops,
-            "ts_ns=%llu event=pair_close_detail intent=%llu sym=%s sb=%llu sa=%llu b=%c@%.2f/%.6f a=%c@%.2f/%.6f\n",
-            static_cast<unsigned long long>(ts_ns),
-            static_cast<unsigned long long>(intent_id),
-            instrument_name(instrument),
-            static_cast<unsigned long long>(sb_coid),
-            static_cast<unsigned long long>(sa_coid),
-            static_cast<int>(static_cast<unsigned char>(bid_tag)),
-            bid_avg_fill,
-            bid_fill_qty,
-            static_cast<int>(static_cast<unsigned char>(ask_tag)),
-            ask_avg_fill,
-            ask_fill_qty);
-        if (!ok1 || !ok2) {
-            return false;
-        }
-        ++pair_close_logged;
-        return true;
-    };
-    auto emit_pair_record = [&](PairTrack& p, std::uint64_t ts_ns, const char* reason) {
-        if (!pair_audit_on || !p.active || p.emitted) {
             return;
         }
-        const double buy_avg_px = p.buy_qty > 0.0 ? (p.buy_notional / p.buy_qty) : 0.0;
-        const double sell_avg_px = p.sell_qty > 0.0 ? (p.sell_notional / p.sell_qty) : 0.0;
-        const double matched_qty = std::min(p.buy_qty, p.sell_qty);
-        const double pair_pnl = matched_qty > 0.0 ? ((sell_avg_px - buy_avg_px) * matched_qty) : 0.0;
-        const double bid_avg_fill = p.bid_fill_qty > 0.0 ? (p.bid_fill_notional / p.bid_fill_qty) : 0.0;
-        const double ask_avg_fill = p.ask_fill_qty > 0.0 ? (p.ask_fill_notional / p.ask_fill_qty) : 0.0;
-        const char bid_c = !p.intent_bid ? '-' : (p.bid_term_tag != '\0' ? p.bid_term_tag : '?');
-        const char ask_c = !p.intent_ask ? '-' : (p.ask_term_tag != '\0' ? p.ask_term_tag : '?');
-        const bool ok = emit_pair_close_audit(
-            p.pair_id,
+        const bool ok = exec_audit_line(
+            pair_audit_on,
+            pair_audit_log,
+            pair_audit_drops,
+            "ts_ns=%llu event=leg_open event_id=%llu sym=%s leg=%s px=%.2f qty=%.6f coid=%llu\n",
+            static_cast<unsigned long long>(ts_ns),
+            static_cast<unsigned long long>(event_id),
+            instrument_name(instrument),
+            leg,
+            px,
+            qty,
+            0ULL);
+        if (ok) {
+            ++leg_open_logged;
+        }
+    };
+    auto emit_leg_close = [&](std::uint64_t event_id,
+        Instrument instrument,
+        std::uint64_t ts_ns,
+        const char* leg,
+        std::uint64_t coid,
+        const char* reason,
+        char tag,
+        double fill_px,
+        double fill_qty) {
+        if (!pair_audit_on) {
+            return;
+        }
+        const bool ok = exec_audit_line(
+            pair_audit_on,
+            pair_audit_log,
+            pair_audit_drops,
+            "ts_ns=%llu event=leg_close event_id=%llu sym=%s leg=%s coid=%llu reason=%s tag=%c fill_px=%.2f fill_qty=%.6f\n",
+            static_cast<unsigned long long>(ts_ns),
+            static_cast<unsigned long long>(event_id),
+            instrument_name(instrument),
+            leg,
+            static_cast<unsigned long long>(coid),
+            reason,
+            static_cast<int>(static_cast<unsigned char>(tag)),
+            fill_px,
+            fill_qty);
+        if (ok) {
+            ++leg_close_logged;
+        }
+    };
+    auto emit_leg_audit_close_if_side_terminal = [&](PairTrack& p,
+        Side side,
+        std::uint64_t ts_ns,
+        const char* reason) {
+        if (!pair_audit_on || !p.active) {
+            return;
+        }
+        if (side == Side::Buy) {
+            if (!p.intent_bid || !p.bid_terminal || p.leg_audit_bid_close_emitted) {
+                return;
+            }
+            const double avg =
+                p.bid_fill_qty > 0.0 ? (p.bid_fill_notional / p.bid_fill_qty) : 0.0;
+            const char tag = p.bid_term_tag != '\0' ? p.bid_term_tag : '?';
+            emit_leg_close(
+                p.audit_event_id,
+                p.instrument,
+                ts_ns,
+                "bid",
+                p.bid_last_coid,
+                reason,
+                tag,
+                avg,
+                p.bid_fill_qty);
+            p.leg_audit_bid_close_emitted = true;
+            return;
+        }
+        if (!p.intent_ask || !p.ask_terminal || p.leg_audit_ask_close_emitted) {
+            return;
+        }
+        const double avg = p.ask_fill_qty > 0.0 ? (p.ask_fill_notional / p.ask_fill_qty) : 0.0;
+        const char tag = p.ask_term_tag != '\0' ? p.ask_term_tag : '?';
+        emit_leg_close(
+            p.audit_event_id,
             p.instrument,
             ts_ns,
-            reason,
-            matched_qty,
-            pair_pnl,
-            p.open_coids,
-            p.bid_last_coid,
+            "ask",
             p.ask_last_coid,
-            bid_c,
-            ask_c,
-            bid_avg_fill,
-            p.bid_fill_qty,
-            ask_avg_fill,
+            reason,
+            tag,
+            avg,
             p.ask_fill_qty);
-        if (!ok) {
-            return;
-        }
-        p.emitted = true;
+        p.leg_audit_ask_close_emitted = true;
     };
-    auto try_finalize_pair = [&](PairTrack& p, std::uint64_t ts_ns, const char* reason) {
-        if (!p.active || p.emitted) {
+    auto emit_leg_audit_close_side_without_send = [&](PairTrack* p,
+        Side side,
+        std::uint64_t ts_ns,
+        const char* reason,
+        std::uint64_t coid,
+        char tag) {
+        if (!pair_audit_on || p == nullptr || !p->active) {
             return;
         }
-        const bool bid_done = !p.intent_bid || p.bid_terminal;
-        const bool ask_done = !p.intent_ask || p.ask_terminal;
-        if (p.open_coids == 0 && bid_done && ask_done) {
-            emit_pair_record(p, ts_ns, reason);
+        if (side == Side::Buy) {
+            if (!p->intent_bid || p->leg_audit_bid_close_emitted) {
+                return;
+            }
+            emit_leg_close(p->audit_event_id, p->instrument, ts_ns, "bid", coid, reason, tag, 0.0, 0.0);
+            p->leg_audit_bid_close_emitted = true;
+            return;
+        }
+        if (!p->intent_ask || p->leg_audit_ask_close_emitted) {
+            return;
+        }
+        emit_leg_close(p->audit_event_id, p->instrument, ts_ns, "ask", coid, reason, tag, 0.0, 0.0);
+        p->leg_audit_ask_close_emitted = true;
+    };
+    auto emit_leg_audit_close_unsent_intents = [&](PairTrack* p, std::uint64_t ts_ns, const char* reason) {
+        if (!pair_audit_on || p == nullptr || !p->active) {
+            return;
+        }
+        if (p->intent_bid && !p->leg_audit_bid_close_emitted) {
+            emit_leg_close(p->audit_event_id, p->instrument, ts_ns, "bid", 0ULL, reason, '-', 0.0, 0.0);
+            p->leg_audit_bid_close_emitted = true;
+        }
+        if (p->intent_ask && !p->leg_audit_ask_close_emitted) {
+            emit_leg_close(p->audit_event_id, p->instrument, ts_ns, "ask", 0ULL, reason, '-', 0.0, 0.0);
+            p->leg_audit_ask_close_emitted = true;
         }
     };
     auto upsert_coid_pair = [&](std::uint64_t coid, std::uint64_t pair_id, Side side) -> CoidPairRef* {
@@ -1742,19 +1787,13 @@ int main() {
         }
         return nullptr;
     };
-    auto supersede_open_pairs_for_symbol = [&](Instrument instrument, std::uint64_t ts_ns) {
-        for (PairTrack& p : pair_tracks) {
-            if (!p.active || p.emitted || p.instrument != instrument) {
-                continue;
-            }
-            emit_pair_record(p, ts_ns, "superseded");
-        }
-    };
-    auto begin_pair_from_intent = [&](Instrument instrument, const hft::QuoteIntent& quote, std::uint64_t ts_ns) {
+    auto begin_pair_from_intent = [&](Instrument instrument,
+        const hft::QuoteIntent& quote,
+        std::uint64_t ts_ns,
+        std::uint64_t audit_eid) {
         if (!quote.bid.has_value() && !quote.ask.has_value()) {
             return;
         }
-        supersede_open_pairs_for_symbol(instrument, ts_ns);
         const std::uint64_t pair_id = ++pair_seq;
         const std::size_t base = static_cast<std::size_t>(pair_id % kPairTrackCap);
         PairTrack* slot = nullptr;
@@ -1773,6 +1812,7 @@ int main() {
         *slot = PairTrack {};
         slot->active = true;
         slot->pair_id = pair_id;
+        slot->audit_event_id = audit_eid;
         slot->instrument = instrument;
         slot->ts_intent_ns = ts_ns;
         slot->ts_last_event_ns = ts_ns;
@@ -1788,22 +1828,11 @@ int main() {
         }
         current_pair_id_by_symbol[instrument_index(instrument)] = pair_id;
         if (pair_audit_on) {
-            const bool logged = exec_audit_line(
-                pair_audit_on,
-                pair_audit_log,
-                pair_audit_drops,
-                "ts_ns=%llu event=pair_intent intent=%llu sym=%s ib=%u@%.2f/%.6f ia=%u@%.2f/%.6f\n",
-                static_cast<unsigned long long>(ts_ns),
-                static_cast<unsigned long long>(pair_id),
-                instrument_name(instrument),
-                slot->intent_bid ? 1U : 0U,
-                slot->intent_bid_px,
-                slot->intent_bid_qty,
-                slot->intent_ask ? 1U : 0U,
-                slot->intent_ask_px,
-                slot->intent_ask_qty);
-            if (logged) {
-                ++pair_intent_logged;
+            if (slot->intent_bid) {
+                emit_leg_open(audit_eid, instrument, ts_ns, "bid", slot->intent_bid_px, slot->intent_bid_qty);
+            }
+            if (slot->intent_ask) {
+                emit_leg_open(audit_eid, instrument, ts_ns, "ask", slot->intent_ask_px, slot->intent_ask_qty);
             }
         }
         store_last_intent_quote(instrument_index(instrument), quote);
@@ -1836,7 +1865,7 @@ int main() {
                 p->ask_term_tag = tag;
             }
         }
-        try_finalize_pair(*p, ts_ns, reason);
+        emit_leg_audit_close_if_side_terminal(*p, ref->side, ts_ns, reason);
     };
 
     while (!g_stop.load(std::memory_order_relaxed)) {
@@ -2123,7 +2152,9 @@ int main() {
                         }
                     }
                 }
-                try_finalize_pair(*pair_slot, msg.ts_ns, "terminal");
+                if (pair_ref != nullptr) {
+                    emit_leg_audit_close_if_side_terminal(*pair_slot, pair_ref->side, msg.ts_ns, "terminal");
+                }
             }
             const bool audit_drop_copy = msg.report.type == ExecEventType::Fill ||
                 msg.report.type == ExecEventType::Reject || msg.report.type == ExecEventType::Canceled ||
@@ -2295,48 +2326,81 @@ int main() {
                             continue;
                         }
                         ++strategy_signals;
+                        bool began_pair_this_tick = false;
                         if (quote.bid.has_value() || quote.ask.has_value()) {
                             ++intent_generated;
                             const std::size_t sym_ix_q = instrument_index(event.instrument);
                             if (pair_audit_on && quote_matches_last_intent(sym_ix_q, quote)) {
-                                const std::uint64_t intent_id = current_pair_id_by_symbol[sym_ix_q];
-                                if (intent_id != 0) {
-                                    // "Unchanged" does not create a new PairTrack; keep `pair_intent`
-                                    // reserved for real pair starts only.
-                                    emit_pair_close_audit(
-                                        intent_id,
-                                        event.instrument,
-                                        strategy_ts,
-                                        "unchanged",
-                                        0.0,
-                                        0.0,
-                                        0ULL,
-                                        0ULL,
-                                        0ULL,
-                                        'U',
-                                        'U',
-                                        0.0,
-                                        0.0,
-                                        0.0,
-                                        0.0);
+                                const std::uint64_t cur_pid = current_pair_id_by_symbol[sym_ix_q];
+                                if (cur_pid != 0) {
+                                    const std::uint64_t eid = ++leg_audit_event_seq;
+                                    if (quote.bid.has_value()) {
+                                        emit_leg_open(
+                                            eid,
+                                            event.instrument,
+                                            strategy_ts,
+                                            "bid",
+                                            quote.bid->price,
+                                            quote.bid->qty);
+                                        emit_leg_close(
+                                            eid,
+                                            event.instrument,
+                                            strategy_ts,
+                                            "bid",
+                                            0ULL,
+                                            "unchanged",
+                                            '-',
+                                            0.0,
+                                            0.0);
+                                    }
+                                    if (quote.ask.has_value()) {
+                                        emit_leg_open(
+                                            eid,
+                                            event.instrument,
+                                            strategy_ts,
+                                            "ask",
+                                            quote.ask->price,
+                                            quote.ask->qty);
+                                        emit_leg_close(
+                                            eid,
+                                            event.instrument,
+                                            strategy_ts,
+                                            "ask",
+                                            0ULL,
+                                            "unchanged",
+                                            '-',
+                                            0.0,
+                                            0.0);
+                                    }
                                     store_last_intent_quote(sym_ix_q, quote);
                                 } else {
-                                    begin_pair_from_intent(event.instrument, quote, strategy_ts);
+                                    const std::uint64_t eid = ++leg_audit_event_seq;
+                                    begin_pair_from_intent(event.instrument, quote, strategy_ts, eid);
+                                    began_pair_this_tick = true;
                                 }
                             } else {
-                                begin_pair_from_intent(event.instrument, quote, strategy_ts);
+                                const std::uint64_t eid = ++leg_audit_event_seq;
+                                begin_pair_from_intent(event.instrument, quote, strategy_ts, eid);
+                                began_pair_this_tick = true;
                             }
                         }
                         const auto cmd = order_manager.on_quote(event.instrument, quote, strategy_ts);
-                        if (cmd.has_value()) {
-                            if (cmd->type == CommandType::New) {
+                        if (!cmd.has_value()) {
+                            if (began_pair_this_tick && pair_audit_on) {
+                                if (PairTrack* pt = find_pair_slot(current_pair_id_by_symbol[idx]); pt != nullptr) {
+                                    emit_leg_audit_close_unsent_intents(pt, strategy_ts, "no_command");
+                                }
+                            }
+                        } else {
+                            const OrderCommand& cmd_ref = cmd.value();
+                            if (cmd_ref.type == CommandType::New) {
                                 ++om_cmd_new;
-                            } else if (cmd->type == CommandType::Replace) {
+                            } else if (cmd_ref.type == CommandType::Replace) {
                                 ++om_cmd_replace;
-                            } else if (cmd->type == CommandType::Cancel) {
+                            } else if (cmd_ref.type == CommandType::Cancel) {
                                 ++om_cmd_cancel;
                             }
-                            const auto risk_result = risk.validate(*cmd);
+                            const auto risk_result = risk.validate(cmd_ref);
                             if (risk_result != RiskRejectReason::None) {
                                 ++exec_cmd_rejected_risk;
                                 if (risk_result == RiskRejectReason::KillSwitchEngaged) {
@@ -2349,14 +2413,25 @@ int main() {
                                     "ts_ns=%llu event=risk_reject sym=%s coid=%llu reason=%u",
                                     static_cast<unsigned long long>(strategy_ts),
                                     instrument_name(event.instrument),
-                                    static_cast<unsigned long long>(cmd->client_order_id),
+                                    static_cast<unsigned long long>(cmd_ref.client_order_id),
                                     static_cast<unsigned>(risk_result));
-                                order_manager.on_command_rejected(*cmd);
-                                oms.on_command_rejected(*cmd);
+                                order_manager.on_command_rejected(cmd_ref);
+                                oms.on_command_rejected(cmd_ref);
+                                if (pair_audit_on) {
+                                    if (PairTrack* p = find_pair_slot(current_pair_id_by_symbol[idx]); p != nullptr) {
+                                        emit_leg_audit_close_side_without_send(
+                                            p,
+                                            cmd_ref.side,
+                                            strategy_ts,
+                                            "risk_reject",
+                                            cmd_ref.client_order_id,
+                                            'R');
+                                    }
+                                }
                                 continue;
                             }
                             ++risk_pass;
-                            auto send_cmd = *cmd;
+                            auto send_cmd = cmd_ref;
                             if (canary_fill_mode && send_cmd.type == CommandType::New && send_cmd.price > 0.0) {
                                 bool apply_canary_to_symbol = true;
                                 if (canary_rotate_symbols && canary_rotation_window_ns > 0) {
@@ -2388,8 +2463,8 @@ int main() {
                             const double min_notional_symbol = exch_min_notional_by_symbol[idx];
                             if (send_notional > 0.0 && send_notional < min_notional_symbol) {
                                 ++exec_exch_filter_reject;
-                                order_manager.on_command_rejected(*cmd);
-                                oms.on_command_rejected(*cmd);
+                                order_manager.on_command_rejected(cmd_ref);
+                                oms.on_command_rejected(cmd_ref);
                                 exec_audit_line(
                                     exec_audit_on,
                                     exec_audit,
@@ -2397,9 +2472,20 @@ int main() {
                                     "ts_ns=%llu event=exch_filter_reject sym=%s coid=%llu notional=%.6f min_notional=%.6f",
                                     static_cast<unsigned long long>(strategy_ts),
                                     instrument_name(event.instrument),
-                                    static_cast<unsigned long long>(cmd->client_order_id),
+                                    static_cast<unsigned long long>(cmd_ref.client_order_id),
                                     send_notional,
                                     min_notional_symbol);
+                                if (pair_audit_on) {
+                                    if (PairTrack* p = find_pair_slot(current_pair_id_by_symbol[idx]); p != nullptr) {
+                                        emit_leg_audit_close_side_without_send(
+                                            p,
+                                            cmd_ref.side,
+                                            strategy_ts,
+                                            "exch_filter_reject",
+                                            cmd_ref.client_order_id,
+                                            'X');
+                                    }
+                                }
                                 continue;
                             }
                             const std::uint64_t now_send_ns = now_ns();
@@ -2417,8 +2503,8 @@ int main() {
                                     ++exec_cmd_paced;
                                 }
                                 ++exec_cmd_rate_limited;
-                                order_manager.on_command_rejected(*cmd);
-                                oms.on_command_rejected(*cmd);
+                                order_manager.on_command_rejected(cmd_ref);
+                                oms.on_command_rejected(cmd_ref);
                                 exec_audit_line(
                                     exec_audit_on,
                                     exec_audit,
@@ -2426,9 +2512,20 @@ int main() {
                                     "ts_ns=%llu event=rate_limit_gate sym=%s coid=%llu wt=%d cool=%u",
                                     static_cast<unsigned long long>(strategy_ts),
                                     instrument_name(event.instrument),
-                                    static_cast<unsigned long long>(cmd->client_order_id),
+                                    static_cast<unsigned long long>(cmd_ref.client_order_id),
                                     g_rest_weight_1m.load(std::memory_order_relaxed),
                                     cooldown_active ? 1U : 0U);
+                                if (pair_audit_on) {
+                                    if (PairTrack* p = find_pair_slot(current_pair_id_by_symbol[idx]); p != nullptr) {
+                                        emit_leg_audit_close_side_without_send(
+                                            p,
+                                            cmd_ref.side,
+                                            strategy_ts,
+                                            "rate_limit_gate",
+                                            cmd_ref.client_order_id,
+                                            'L');
+                                    }
+                                }
                                 continue;
                             }
                             const bool transport_cooldown_on =
@@ -2436,18 +2533,40 @@ int main() {
                             if (transport_cooldown_on) {
                                 ++transport_cooldown_active;
                                 ++exec_cmd_rate_limited;
-                                order_manager.on_command_rejected(*cmd);
-                                oms.on_command_rejected(*cmd);
+                                order_manager.on_command_rejected(cmd_ref);
+                                oms.on_command_rejected(cmd_ref);
+                                if (pair_audit_on) {
+                                    if (PairTrack* p = find_pair_slot(current_pair_id_by_symbol[idx]); p != nullptr) {
+                                        emit_leg_audit_close_side_without_send(
+                                            p,
+                                            cmd_ref.side,
+                                            strategy_ts,
+                                            "transport_cooldown",
+                                            cmd_ref.client_order_id,
+                                            'T');
+                                    }
+                                }
                                 continue;
                             }
                             if (transport_circuit_until_ns[idx] > now_send_ns) {
                                 ++transport_circuit_blocked;
                                 ++exec_cmd_rate_limited;
-                                order_manager.on_command_rejected(*cmd);
-                                oms.on_command_rejected(*cmd);
+                                order_manager.on_command_rejected(cmd_ref);
+                                oms.on_command_rejected(cmd_ref);
+                                if (pair_audit_on) {
+                                    if (PairTrack* p = find_pair_slot(current_pair_id_by_symbol[idx]); p != nullptr) {
+                                        emit_leg_audit_close_side_without_send(
+                                            p,
+                                            cmd_ref.side,
+                                            strategy_ts,
+                                            "transport_circuit",
+                                            cmd_ref.client_order_id,
+                                            'T');
+                                    }
+                                }
                                 continue;
                             }
-                            oms.on_command_sent(*cmd);
+                            oms.on_command_sent(cmd_ref);
                             ++gw_attempt;
                             hft::execution::GatewaySendResult gr {};
                             const std::uint32_t tx_attempts =
@@ -2510,29 +2629,40 @@ int main() {
                                     "ts_ns=%llu event=gw_fail sym=%s coid=%llu http=%d ix=%d type=%u",
                                     static_cast<unsigned long long>(strategy_ts),
                                     instrument_name(event.instrument),
-                                    static_cast<unsigned long long>(cmd->client_order_id),
+                                    static_cast<unsigned long long>(cmd_ref.client_order_id),
                                     gr.http_status,
                                     gr.binance_error_code,
-                                    static_cast<unsigned>(cmd->type));
+                                    static_cast<unsigned>(cmd_ref.type));
                                 if (!uncertain_transport) {
-                                    order_manager.on_command_rejected(*cmd);
-                                    oms.on_command_rejected(*cmd);
+                                    order_manager.on_command_rejected(cmd_ref);
+                                    oms.on_command_rejected(cmd_ref);
+                                    if (pair_audit_on) {
+                                        if (PairTrack* p = find_pair_slot(current_pair_id_by_symbol[idx]); p != nullptr) {
+                                            emit_leg_audit_close_side_without_send(
+                                                p,
+                                                cmd_ref.side,
+                                                strategy_ts,
+                                                "gw_fail",
+                                                cmd_ref.client_order_id,
+                                                'G');
+                                        }
+                                    }
                                 }
                                 continue;
                             }
                             transport_fail_streak_by_symbol[idx] = 0;
                             ++gw_ok;
-                            oms.on_command_acked(*cmd);
-                            if (cmd->client_order_id > 0) {
-                                const std::size_t li = static_cast<std::size_t>(cmd->client_order_id % kLifecycleCap);
+                            oms.on_command_acked(cmd_ref);
+                            if (cmd_ref.client_order_id > 0) {
+                                const std::size_t li = static_cast<std::size_t>(cmd_ref.client_order_id % kLifecycleCap);
                                 auto& e = lifecycle[li];
-                                if (e.active && e.client_order_id != cmd->client_order_id) {
+                                if (e.active && e.client_order_id != cmd_ref.client_order_id) {
                                     ++lifecycle_overflow;
                                 }
                                 e.active = true;
                                 e.timeout_reported = false;
-                                e.client_order_id = cmd->client_order_id;
-                                e.instrument = cmd->instrument;
+                                e.client_order_id = cmd_ref.client_order_id;
+                                e.instrument = cmd_ref.instrument;
                                 e.ts_sent_ns = now_send_ns;
                             }
                             {
@@ -2540,20 +2670,20 @@ int main() {
                                 if (PairTrack* p = find_pair_slot(pair_id); p != nullptr) {
                                     p->ts_last_event_ns = now_send_ns;
                                     ++p->cmd_sent;
-                                    if (cmd->type == CommandType::Cancel) {
+                                    if (cmd_ref.type == CommandType::Cancel) {
                                         ++p->cancels;
                                     }
-                                    if (cmd->side == Side::Buy) {
-                                        p->bid_last_coid = cmd->client_order_id;
-                                        p->bid_last_limit_px = cmd->price;
+                                    if (cmd_ref.side == Side::Buy) {
+                                        p->bid_last_coid = cmd_ref.client_order_id;
+                                        p->bid_last_limit_px = cmd_ref.price;
                                     } else {
-                                        p->ask_last_coid = cmd->client_order_id;
-                                        p->ask_last_limit_px = cmd->price;
+                                        p->ask_last_coid = cmd_ref.client_order_id;
+                                        p->ask_last_limit_px = cmd_ref.price;
                                     }
-                                    const bool had_ref = find_coid_pair(cmd->client_order_id) != nullptr;
-                                    CoidPairRef* ref = upsert_coid_pair(cmd->client_order_id, pair_id, cmd->side);
+                                    const bool had_ref = find_coid_pair(cmd_ref.client_order_id) != nullptr;
+                                    CoidPairRef* ref = upsert_coid_pair(cmd_ref.client_order_id, pair_id, cmd_ref.side);
                                     if (ref != nullptr && !had_ref &&
-                                        (cmd->type == CommandType::New || cmd->type == CommandType::Replace)) {
+                                        (cmd_ref.type == CommandType::New || cmd_ref.type == CommandType::Replace)) {
                                         ++p->open_coids;
                                     }
                                 }
@@ -2566,16 +2696,16 @@ int main() {
                                 "ts_ns=%llu event=sent sym=%s coid=%llu type=%u px=%.2f qty=%.6f",
                                 static_cast<unsigned long long>(strategy_ts),
                                 instrument_name(event.instrument),
-                                static_cast<unsigned long long>(cmd->client_order_id),
-                                static_cast<unsigned>(cmd->type),
-                                cmd->price,
-                                cmd->qty);
+                                static_cast<unsigned long long>(cmd_ref.client_order_id),
+                                static_cast<unsigned>(cmd_ref.type),
+                                cmd_ref.price,
+                                cmd_ref.qty);
                             ++exec_cmd_sent;
-                            if (cmd->type == CommandType::New) {
+                            if (cmd_ref.type == CommandType::New) {
                                 ++exec_cmd_new;
-                            } else if (cmd->type == CommandType::Replace) {
+                            } else if (cmd_ref.type == CommandType::Replace) {
                                 ++exec_cmd_replace;
-                            } else if (cmd->type == CommandType::Cancel) {
+                            } else if (cmd_ref.type == CommandType::Cancel) {
                                 ++exec_cmd_cancel;
                             }
                         }
@@ -2929,8 +3059,8 @@ int main() {
                       << " gw_last_ix=" << gw_fail_last_ix
                       << " exec_audit_drop=" << exec_audit_drops
                       << " pair_audit_drop=" << pair_audit_drops
-                      << " pair_close_logged=" << pair_close_logged
-                      << " pair_intent_logged=" << pair_intent_logged
+                      << " leg_open_logged=" << leg_open_logged
+                      << " leg_close_logged=" << leg_close_logged
                       << " pair_slot_overflow=" << pair_track_overflow
                       << " pair_coid_overflow=" << pair_coid_overflow
                       << " rec_exch_open=" << g_reconcile_remote_open.load(std::memory_order_relaxed)
@@ -3074,10 +3204,41 @@ int main() {
 
     const std::uint64_t shutdown_ts_ns = now_ns();
     for (auto& p : pair_tracks) {
-        if (!p.active || p.emitted) {
+        if (!p.active || !pair_audit_on) {
             continue;
         }
-        emit_pair_record(p, shutdown_ts_ns, "shutdown");
+        if (p.intent_bid && !p.leg_audit_bid_close_emitted) {
+            const double avg =
+                p.bid_fill_qty > 0.0 ? (p.bid_fill_notional / p.bid_fill_qty) : 0.0;
+            const char tag = p.bid_term_tag != '\0' ? p.bid_term_tag : '-';
+            emit_leg_close(
+                p.audit_event_id,
+                p.instrument,
+                shutdown_ts_ns,
+                "bid",
+                p.bid_last_coid,
+                "shutdown",
+                tag,
+                avg,
+                p.bid_fill_qty);
+            p.leg_audit_bid_close_emitted = true;
+        }
+        if (p.intent_ask && !p.leg_audit_ask_close_emitted) {
+            const double avg =
+                p.ask_fill_qty > 0.0 ? (p.ask_fill_notional / p.ask_fill_qty) : 0.0;
+            const char tag = p.ask_term_tag != '\0' ? p.ask_term_tag : '-';
+            emit_leg_close(
+                p.audit_event_id,
+                p.instrument,
+                shutdown_ts_ns,
+                "ask",
+                p.ask_last_coid,
+                "shutdown",
+                tag,
+                avg,
+                p.ask_fill_qty);
+            p.leg_audit_ask_close_emitted = true;
+        }
     }
     pair_audit_log.shutdown_join();
     exec_audit.shutdown_join();
