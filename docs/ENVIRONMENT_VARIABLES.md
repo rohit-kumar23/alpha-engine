@@ -296,6 +296,14 @@ Many values are stored as integers to avoid floating point work in hot paths.
   - **Meaning:** Local cooldown after throttle responses (`-1003`, `-1015`).
   - **Use case:** Reduce repeated throttle penalties.
 
+- `HFT_TRADABLE_ZERO_ALERT_MS`
+  - **Meaning:** Duration threshold before raising md-health alert when a symbol stays non-tradable while engine is in `TRADING_READY`.
+  - **Use case:** Detect persistent readiness/tradability degradation quickly.
+
+- `HFT_REC_MISMATCH_ALERT_STEP`
+  - **Meaning:** Emit an md-health alert each time reconcile mismatch counter grows by this step.
+  - **Use case:** Surface OMS-vs-exchange divergence escalation.
+
 - `HFT_MAIN_MD_BATCH_MAX`
   - **Meaning:** Max market-data events processed per main loop batch.
   - **Use case:** Bound loop-time variance under extreme feed bursts.

@@ -676,6 +676,8 @@ int main() {
     const int q2s_stale_drop_ms = read_env_int_or_default("HFT_Q2S_STALE_DROP_MS", 50);
     const int rest_weight_soft_limit = read_env_int_or_default("HFT_REST_WEIGHT_SOFT_LIMIT", 1100);
     const int rest_throttle_cooldown_ms = read_env_int_or_default("HFT_REST_THROTTLE_COOLDOWN_MS", 200);
+    const int tradable_zero_alert_ms = read_env_int_or_default("HFT_TRADABLE_ZERO_ALERT_MS", 3000);
+    const int rec_mismatch_alert_step = read_env_int_or_default("HFT_REC_MISMATCH_ALERT_STEP", 5);
     const bool reconcile_heal = [] {
         const char* v = std::getenv("HFT_RECONCILE_HEAL");
         return v != nullptr && v[0] == '1';
@@ -1308,8 +1310,13 @@ int main() {
     std::uint64_t reconcile_healed_pending = 0;
     std::uint64_t reconcile_healed_pending_drop_om = 0;
     std::uint64_t reconcile_mismatch_streak = 0;
+    std::uint64_t reconcile_mismatch_last_alert = 0;
     std::size_t reconcile_last_remote = 0;
     std::size_t reconcile_last_local = 0;
+    std::uint64_t throttle_quote_suppressed = 0;
+    std::array<std::uint64_t, 3> tradable_zero_since_ns {0, 0, 0};
+    std::array<std::uint64_t, 3> tradable_zero_alerts {0, 0, 0};
+    std::array<std::uint64_t, 3> tradable_zero_last_alert_ns {0, 0, 0};
     std::array<std::uint32_t, 3> adaptive_stale_ms {
         static_cast<std::uint32_t>(exec_cancel_stale_btc_ms > 0 ? exec_cancel_stale_btc_ms : 0),
         static_cast<std::uint32_t>(exec_cancel_stale_eth_ms > 0 ? exec_cancel_stale_eth_ms : 0),
@@ -1412,6 +1419,20 @@ int main() {
                 }
                 reconcile_last_remote = remote;
                 reconcile_last_local = local_open_est;
+                if (rec_mismatch_alert_step > 0 &&
+                    reconcile_mismatch >= reconcile_mismatch_last_alert + static_cast<std::uint64_t>(rec_mismatch_alert_step)) {
+                    reconcile_mismatch_last_alert = reconcile_mismatch;
+                    exec_audit_line(
+                        md_health_on,
+                        md_health_log,
+                        md_health_drops,
+                        "ts_ns=%llu event=alert_reconcile_mismatch mismatch=%llu streak=%llu remote=%llu local=%llu",
+                        static_cast<unsigned long long>(now_ns()),
+                        static_cast<unsigned long long>(reconcile_mismatch),
+                        static_cast<unsigned long long>(reconcile_mismatch_streak),
+                        static_cast<unsigned long long>(remote),
+                        static_cast<unsigned long long>(local_open_est));
+                }
                 if (reconcile_heal && reconcile_heal_max_per_tick > 0 && reconcile_mismatch_streak >= 2) {
                     const std::size_t max_heal = static_cast<std::size_t>(reconcile_heal_max_per_tick);
                     const std::uint64_t heal_ts = now_ns();
@@ -1673,6 +1694,19 @@ int main() {
                     }
                     if (quote.bid.has_value() || quote.ask.has_value() ||
                         order_manager.active_orders(event.instrument) > 0) {
+                        const std::uint64_t now_gate_ns = now_ns();
+                        const bool rest_cooldown_active =
+                            rest_cooldown_until_ns > now_gate_ns && rest_throttle_cooldown_ms > 0;
+                        const bool rest_soft_limit_active =
+                            rest_weight_soft_limit > 0 &&
+                            g_rest_weight_1m.load(std::memory_order_relaxed) >= rest_weight_soft_limit;
+                        const bool transport_cooldown_on =
+                            transport_cooldown_until_ns > now_gate_ns && transport_cooldown_ms > 0;
+                        const bool transport_circuit_on = transport_circuit_until_ns[idx] > now_gate_ns;
+                        if (rest_cooldown_active || rest_soft_limit_active || transport_cooldown_on || transport_circuit_on) {
+                            ++throttle_quote_suppressed;
+                            continue;
+                        }
                         ++strategy_signals;
                         if (quote.bid.has_value() || quote.ask.has_value()) {
                             ++intent_generated;
@@ -1701,6 +1735,7 @@ int main() {
                                     instrument_name(event.instrument),
                                     static_cast<unsigned long long>(cmd->client_order_id),
                                     static_cast<unsigned>(risk_result));
+                                order_manager.on_command_rejected(*cmd);
                                 oms.on_command_rejected(*cmd);
                                 continue;
                             }
@@ -1751,7 +1786,6 @@ int main() {
                                     min_notional_symbol);
                                 continue;
                             }
-                            oms.on_command_sent(*cmd);
                             const std::uint64_t now_send_ns = now_ns();
                             const std::uint64_t min_send_ns = min_send_ns_by_symbol[idx];
                             const bool paced_active =
@@ -1797,6 +1831,7 @@ int main() {
                                 oms.on_command_rejected(*cmd);
                                 continue;
                             }
+                            oms.on_command_sent(*cmd);
                             ++gw_attempt;
                             hft::execution::GatewaySendResult gr {};
                             const std::uint32_t tx_attempts =
@@ -2108,6 +2143,39 @@ int main() {
             } else if (consumed == 0 && snapshot_applied == 0) {
                 run_state = "BOOTSTRAP";
             }
+            if (trading_ready_now && tradable_zero_alert_ms > 0) {
+                const std::uint64_t now_alert_ns = now_ns();
+                const std::array<bool, 3> tradable_flags {tradable_btc, tradable_eth, tradable_sol};
+                for (std::size_t i = 0; i < tradable_flags.size(); ++i) {
+                    if (tradable_flags[i]) {
+                        tradable_zero_since_ns[i] = 0;
+                        continue;
+                    }
+                    if (tradable_zero_since_ns[i] == 0) {
+                        tradable_zero_since_ns[i] = now_alert_ns;
+                    }
+                    const std::uint64_t zero_dur_ns = now_alert_ns - tradable_zero_since_ns[i];
+                    const std::uint64_t alert_ns = static_cast<std::uint64_t>(tradable_zero_alert_ms) * 1000000ULL;
+                    if (zero_dur_ns >= alert_ns &&
+                        (tradable_zero_last_alert_ns[i] == 0 || now_alert_ns - tradable_zero_last_alert_ns[i] >= alert_ns)) {
+                        tradable_zero_last_alert_ns[i] = now_alert_ns;
+                        ++tradable_zero_alerts[i];
+                        exec_audit_line(
+                            md_health_on,
+                            md_health_log,
+                            md_health_drops,
+                            "ts_ns=%llu event=alert_tradable_zero sym=%s zero_ms=%llu state=%s ready=%u sync=%u",
+                            static_cast<unsigned long long>(now_alert_ns),
+                            instrument_name(instruments[i]),
+                            static_cast<unsigned long long>(zero_dur_ns / 1000000ULL),
+                            run_state,
+                            static_cast<unsigned>(i == 0 ? sym_ready_btc : (i == 1 ? sym_ready_eth : sym_ready_sol)),
+                            static_cast<unsigned>(i == 0 ? sym_sync_btc : (i == 1 ? sym_sync_eth : sym_sync_sol)));
+                    }
+                }
+            } else {
+                tradable_zero_since_ns = {0, 0, 0};
+            }
             const auto cancel_opp = order_manager.cancel_opposite_counts();
             const auto cancel_stale = order_manager.cancel_stale_counts();
             const auto cancel_adv = order_manager.cancel_adverse_counts();
@@ -2195,6 +2263,7 @@ int main() {
                       << " exec_risk_kill=" << exec_risk_kill
                       << " exec_paced=" << exec_cmd_paced
                       << " exec_rate_limited=" << exec_cmd_rate_limited
+                      << " throttle_q_suppressed=" << throttle_quote_suppressed
                       << " exec_gateway_fail=" << exec_cmd_gateway_fail
                       << " exec_exch_filter_reject=" << exec_exch_filter_reject
                       << " gw_attempt=" << gw_attempt
@@ -2306,6 +2375,9 @@ int main() {
                       << " tradable_btc=" << (tradable_btc ? 1 : 0)
                       << " tradable_eth=" << (tradable_eth ? 1 : 0)
                       << " tradable_sol=" << (tradable_sol ? 1 : 0)
+                      << " alert_tradable_zero_btc=" << tradable_zero_alerts[0]
+                      << " alert_tradable_zero_eth=" << tradable_zero_alerts[1]
+                      << " alert_tradable_zero_sol=" << tradable_zero_alerts[2]
                       << " seed_parsed_count=" << position_seed_parsed_count
                       << " seed_missing_count=" << position_seed_missing_count
                       << " seed_invalid_count=" << position_seed_invalid_count
@@ -2315,6 +2387,22 @@ int main() {
                       << " resync_flags=" << resync_required_symbols
                       << " last=" << instrument_name(last_consumed_instrument)
                       << '\n';
+            exec_audit_line(
+                md_health_on,
+                md_health_log,
+                md_health_drops,
+                "ts_ns=%llu event=md_health_tick state=%s wt=%d q2s_p99=%llu rec_mismatch=%llu oms_invalid=%llu tradable=%u/%u/%u rate_limited=%llu throttle_supp=%llu",
+                static_cast<unsigned long long>(now_ns()),
+                run_state,
+                g_rest_weight_1m.load(std::memory_order_relaxed),
+                static_cast<unsigned long long>(q2s_window.percentile(0.99)),
+                static_cast<unsigned long long>(reconcile_mismatch),
+                static_cast<unsigned long long>(oms.invalid_transitions()),
+                tradable_btc ? 1U : 0U,
+                tradable_eth ? 1U : 0U,
+                tradable_sol ? 1U : 0U,
+                static_cast<unsigned long long>(exec_cmd_rate_limited),
+                static_cast<unsigned long long>(throttle_quote_suppressed));
             last_stats = now;
         }
 
