@@ -2,8 +2,10 @@
 
 #include <array>
 #include <charconv>
+#include <chrono>
 #include <optional>
 #include <string>
+#include <thread>
 
 #include <netdb.h>
 #include <sys/socket.h>
@@ -32,6 +34,12 @@ int tcp_connect(const std::string& host, const std::string& port) {
             continue;
         }
         if (::connect(fd, rp->ai_addr, rp->ai_addrlen) == 0) {
+            // Bound socket I/O so snapshot fetch cannot hang indefinitely.
+            timeval tv {};
+            tv.tv_sec = 1;
+            tv.tv_usec = 0;
+            (void)::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+            (void)::setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
             break;
         }
         ::close(fd);
@@ -45,6 +53,11 @@ bool ssl_read_some(SSL* ssl, std::string& out) {
     char buf[8192];
     const int n = SSL_read(ssl, buf, sizeof(buf));
     if (n <= 0) {
+        const int err = SSL_get_error(ssl, n);
+        if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE) {
+            // Timed out / would block; caller decides retry vs deadline.
+            return true;
+        }
         return false;
     }
     out.append(buf, static_cast<std::size_t>(n));
@@ -187,7 +200,19 @@ std::optional<DepthSnapshot> BinanceSnapshotClient::fetch_depth_snapshot(Instrum
 
         std::string response;
         response.reserve(64 * 1024);
-        while (ssl_read_some(ssl, response)) {
+        const auto read_deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(1500);
+        std::size_t prev_size = 0;
+        while (std::chrono::steady_clock::now() < read_deadline) {
+            const bool keep_reading = ssl_read_some(ssl, response);
+            if (!keep_reading) {
+                break;
+            }
+            // No progress on this iteration; avoid busy spin and retry until deadline.
+            if (response.size() == prev_size) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            } else {
+                prev_size = response.size();
+            }
         }
 
         const auto header_end = response.find("\r\n\r\n");

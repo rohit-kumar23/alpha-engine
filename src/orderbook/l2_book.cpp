@@ -265,7 +265,10 @@ BookSnapshot L2Book::snapshot() const {
 }
 
 bool L2Book::is_ready() const {
-    return best_bid_ > 0.0 && best_ask_ >= best_bid_ && bid_qty_ >= 0.0 && ask_qty_ >= 0.0;
+    // Readiness means we have usable top-of-book values; crossed checks are
+    // handled in strategy trigger path to avoid transient feed glitches
+    // toggling tradability state.
+    return best_bid_ > 0.0 && best_ask_ > 0.0 && bid_qty_ >= 0.0 && ask_qty_ >= 0.0;
 }
 
 bool L2Book::is_in_sync() const {

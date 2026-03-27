@@ -377,6 +377,105 @@ struct ExecReportMsg {
     std::uint64_t ts_ns {};
 };
 
+struct RemoteOpenOrderRef {
+    hft::marketdata::Instrument instrument {hft::marketdata::Instrument::Unknown};
+    std::uint64_t client_order_id {};
+};
+
+hft::marketdata::Instrument instrument_from_symbol_view(std::string_view symbol) {
+    using hft::marketdata::Instrument;
+    if (symbol == "BTCUSDT") {
+        return Instrument::BtcUsdt;
+    }
+    if (symbol == "ETHUSDT") {
+        return Instrument::EthUsdt;
+    }
+    if (symbol == "SOLUSDT") {
+        return Instrument::SolUsdt;
+    }
+    return Instrument::Unknown;
+}
+
+std::size_t extract_json_open_order_refs(
+    std::string_view body,
+    std::array<RemoteOpenOrderRef, kReconcileMaxIds>& out) {
+    constexpr std::string_view key_client_order_id = "\"clientOrderId\"";
+    constexpr std::string_view key_symbol = "\"symbol\"";
+    constexpr std::string_view prefix = "hft_";
+    std::size_t n = 0;
+    std::size_t pos = 0;
+    while (n < out.size() &&
+           (pos = body.find(key_client_order_id, pos)) != std::string_view::npos) {
+        const std::size_t object_start = body.rfind('{', pos);
+        if (object_start == std::string_view::npos) {
+            pos += key_client_order_id.size();
+            continue;
+        }
+        pos += key_client_order_id.size();
+        while (pos < body.size() && (body[pos] == ' ' || body[pos] == '\t' || body[pos] == ':')) {
+            ++pos;
+        }
+        if (pos >= body.size() || body[pos] != '"') {
+            continue;
+        }
+        ++pos;
+        const std::size_t value_start = pos;
+        const std::size_t value_end = body.find('"', value_start);
+        if (value_end == std::string_view::npos) {
+            break;
+        }
+        std::string_view coid = body.substr(value_start, value_end - value_start);
+        pos = value_end + 1;
+        if (coid.size() <= prefix.size() || coid.substr(0, prefix.size()) != prefix) {
+            continue;
+        }
+        coid.remove_prefix(prefix.size());
+        std::uint64_t id = 0;
+        bool id_ok = !coid.empty();
+        for (char c : coid) {
+            if (c < '0' || c > '9') {
+                id_ok = false;
+                break;
+            }
+            id = id * 10ULL + static_cast<std::uint64_t>(c - '0');
+        }
+        if (!id_ok || id == 0) {
+            continue;
+        }
+
+        const std::size_t object_end = body.find('}', value_end);
+        if (object_end == std::string_view::npos || object_end <= object_start) {
+            continue;
+        }
+        std::string_view object = body.substr(object_start, object_end - object_start + 1);
+        const std::size_t symbol_key_pos = object.find(key_symbol);
+        if (symbol_key_pos == std::string_view::npos) {
+            continue;
+        }
+        std::size_t symbol_pos = symbol_key_pos + key_symbol.size();
+        while (symbol_pos < object.size() &&
+               (object[symbol_pos] == ' ' || object[symbol_pos] == '\t' || object[symbol_pos] == ':')) {
+            ++symbol_pos;
+        }
+        if (symbol_pos >= object.size() || object[symbol_pos] != '"') {
+            continue;
+        }
+        ++symbol_pos;
+        const std::size_t symbol_start = symbol_pos;
+        const std::size_t symbol_end = object.find('"', symbol_start);
+        if (symbol_end == std::string_view::npos) {
+            continue;
+        }
+        const hft::marketdata::Instrument instrument =
+            instrument_from_symbol_view(object.substr(symbol_start, symbol_end - symbol_start));
+        if (instrument == hft::marketdata::Instrument::Unknown) {
+            continue;
+        }
+        out[n++] = RemoteOpenOrderRef {instrument, id};
+    }
+    return n;
+}
+
 template <std::size_t Capacity>
 struct DepthEventBuffer {
     std::array<hft::marketdata::MdEvent, Capacity> items {};
@@ -939,6 +1038,29 @@ int main() {
               << " http=" << preflight_position_risk.http_status
               << " ix=" << preflight_position_risk.binance_error_code
               << '\n';
+
+    if (preflight_open_orders.ok) {
+        std::array<RemoteOpenOrderRef, kReconcileMaxIds> startup_open_refs {};
+        const std::size_t startup_open_count =
+            extract_json_open_order_refs(preflight_open_orders.body, startup_open_refs);
+        for (std::size_t i = 0; i < startup_open_count; ++i) {
+            const auto& r = startup_open_refs[i];
+            const auto cancel_res = gateway.send(hft::ordermgmt::OrderCommand {
+                hft::ordermgmt::CommandType::Cancel,
+                r.instrument,
+                r.client_order_id,
+                hft::Side::Buy,
+                0.0,
+                0.0,
+                now_ns()});
+            std::cout << "preflight_cleanup kind=cancel_remote_open sym=" << instrument_name(r.instrument)
+                      << " coid=" << r.client_order_id
+                      << " ok=" << (cancel_res.ok ? 1 : 0)
+                      << " http=" << cancel_res.http_status
+                      << " ix=" << cancel_res.binance_error_code
+                      << '\n';
+        }
+    }
 
     std::array<hft::orderbook::L2Book, 3> books;
     std::array<DepthEventBuffer<1024>, 3> pending_depth;
@@ -1666,6 +1788,10 @@ int main() {
                     last_trigger_ns[idx] = now_trigger_ns;
                     last_trigger_mid[idx] = mid;
                     last_trigger_imb[idx] = snap.imbalance;
+                    if (snap.best_ask <= snap.best_bid || snap.best_bid <= 0.0 || snap.best_ask <= 0.0) {
+                        ++stale_skips;
+                        continue;
+                    }
 
                     if (pnl_drawdown_guard) {
                         const double pnl_now = mid > 0.0
@@ -1702,7 +1828,21 @@ int main() {
                     }
 
                     strategy_states[idx].inventory = risk.position(event.instrument);
-                    const auto quote = strategy_engines[idx].on_book_update(snap, strategy_states[idx]);
+                    auto quote = strategy_engines[idx].on_book_update(snap, strategy_states[idx]);
+                    // Avoid repeated exchange filter rejects by suppressing legs
+                    // that cannot satisfy symbol min-notional.
+                    const double min_notional_symbol = exch_min_notional_by_symbol[idx];
+                    auto suppress_below_min_notional = [&](std::optional<hft::OrderIntent>& leg) {
+                        if (!leg.has_value()) {
+                            return;
+                        }
+                        const double notional = std::abs(leg->price * leg->qty);
+                        if (notional > 0.0 && notional < min_notional_symbol) {
+                            leg.reset();
+                        }
+                    };
+                    suppress_below_min_notional(quote.bid);
+                    suppress_below_min_notional(quote.ask);
                     const std::uint64_t strategy_ts = now_ns();
                     if (event.ts_enqueued_ns > 0 && strategy_ts > event.ts_enqueued_ns) {
                         const std::uint64_t q2s_ns = strategy_ts - event.ts_enqueued_ns;
